@@ -169,10 +169,10 @@ mod PrivateSwap {
         PragmaPricesResponse,
     };
     use super::{
-        ContractAddress, FieldTrait, IAggregatorProxyDispatcher,
-        IAggregatorProxyDispatcherTrait, IVTokenDispatcher, IVTokenDispatcherTrait,
-        IVerifierDispatcher, IVerifierDispatcherTrait, Poseidon2Trait, StrkOrder, WbtcOrder,
-        get_block_timestamp, get_caller_address, get_contract_address,
+        ContractAddress, FieldTrait, IAggregatorProxyDispatcher, IAggregatorProxyDispatcherTrait,
+        IVTokenDispatcher, IVTokenDispatcherTrait, IVerifierDispatcher, IVerifierDispatcherTrait,
+        Poseidon2Trait, StrkOrder, WbtcOrder, get_block_timestamp, get_caller_address,
+        get_contract_address,
     };
 
     component!(path: IncrementalMerkleTreeComponent, storage: imt, event: ImtEvent);
@@ -982,13 +982,19 @@ mod PrivateSwap {
         // Reverts with BOTH_ORACLES_STALE if neither is fresh.
         // -------------------------------------------------------
         fn fetch_oracle_price(self: @ContractState, asset_key: felt252) -> (u128, u32) {
-            let (primary, fallback) = if self.use_pragma.read() {
-                (self.try_pragma_price(asset_key), self.try_chainlink_price(asset_key))
+            if self.use_pragma.read() {
+                let primary = self.try_pragma_price(asset_key);
+                if primary.is_some() {
+                    return primary.unwrap();
+                }
+                self.try_chainlink_price(asset_key).expect(Errors::BOTH_ORACLES_STALE)
             } else {
-                (self.try_chainlink_price(asset_key), self.try_pragma_price(asset_key))
-            };
-
-            primary.unwrap_or(fallback.expect(Errors::BOTH_ORACLES_STALE))
+                let primary = self.try_chainlink_price(asset_key);
+                if primary.is_some() {
+                    return primary.unwrap();
+                }
+                self.try_pragma_price(asset_key).expect(Errors::BOTH_ORACLES_STALE)
+            }
         }
 
         fn try_pragma_price(self: @ContractState, asset_key: felt252) -> Option<(u128, u32)> {
