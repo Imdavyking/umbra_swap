@@ -74,16 +74,16 @@ run-app:
 
 # ── Docker stack ─────────────────────────────────────────────────────────────
 
-up:
+start:
 	docker compose up --build
 
-down:
+stop:
 	docker compose down
 
-up-indexer:
+indexer-start:
 	cd indexer && docker compose up --build
 
-down-indexer:
+indexer-stop:
 	cd indexer && docker compose down
 
 logs:
