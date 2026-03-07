@@ -34,15 +34,16 @@ const erc20Abi = [
 ] as const;
 
 const TABS: { key: AppTab; label: string; icon: string; desc: string }[] = [
-  { key: "swap", label: "Swap", icon: "⇄", desc: "wBTC ↔ STRK" },
   { key: "deposit", label: "Deposit", icon: "↓", desc: "Private pool" },
+  { key: "swap", label: "Swap", icon: "⇄", desc: "wBTC ↔ STRK" },
+
   { key: "withdraw", label: "Withdraw", icon: "↑", desc: "ZK exit" },
   { key: "yield", label: "Yield", icon: "🌱", desc: "Earn on wBTC" },
 ];
 
 export default function UmbraHome() {
   const { address } = useAccount();
-  const [tab, setTab] = useState<AppTab>("yield");
+  const [tab, setTab] = useState<AppTab>("deposit");
   const [wBTCBalance, setwBTCBalance] = useState<number | null>(null);
   const [strkBalance, setStrkBalance] = useState<number | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -254,7 +255,7 @@ export default function UmbraHome() {
               lineHeight: 1.0,
             }}
           >
-            Real BTC.
+            wBTC.
             <br />
             <span style={{ color: "#ffc800" }}>Your Wallet.</span>
           </h1>
@@ -269,10 +270,10 @@ export default function UmbraHome() {
               lineHeight: 1.9,
             }}
           >
-            Schedule USDC → Bitcoin purchases delivered to your wallet
+            ZK privacy
             <br />
             <span style={{ color: "#2a2a3e" }}>
-              ZK privacy · Pragma/Chainlink oracle · Atomic swaps
+              · Pragma/Chainlink oracle · Atomic swaps
             </span>
           </p>
 
@@ -287,7 +288,6 @@ export default function UmbraHome() {
             }}
           >
             {[
-              { label: "Native BTC delivery", color: "#f7931a" },
               { label: "ZK anonymous", color: "#a78bfa" },
               { label: "Non-custodial", color: "#22c55e" },
               { label: "Pragma/Chainlink oracle", color: "#3b82f6" },
@@ -376,7 +376,7 @@ export default function UmbraHome() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(5, 1fr)",
+            gridTemplateColumns: "repeat(4, 1fr)",
             background: "#0e0e18",
             border: "1px solid #1a1a28",
             borderRadius: 12,
