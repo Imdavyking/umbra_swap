@@ -1,56 +1,21 @@
-# Umbra — BTC Protocol on Starknet
+# Umbra — Private Bitcoin on Starknet
 
-> DCA recurring USDC → **real BTC delivered to your Bitcoin wallet**. Deposit wBTC anonymously. Withdraw to any address. No on-chain link between depositor and withdrawer.
+> Deposit wBTC anonymously. Withdraw to any address. No on-chain link between depositor and withdrawer.
 
-**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps) · **Atomiq** (cross-chain LP network)
+**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
 
 ---
 
 ## How It Works
 
-### 1. DCA (USDC → Real BTC via Atomiq)
-
-Schedule recurring fixed-dollar BTC purchases at the live Pragma/Chainlink oracle price. USDC is a stable spend — BTC received varies with price, which is exactly the point of DCA. Unlike simple wBTC-minting DCA tools, Umbra delivers **native BTC to your Bitcoin wallet** via the Atomiq cross-chain LP network.
-
-**Creating an order:**
-
-1. Connect your Bitcoin wallet (Xverse) or paste a Bitcoin address directly
-2. Approve `usdc_per_interval × total_intervals` USDC + a STRK keeper fee reserve
-3. Call `create_dca_order(btc_destination, usdc_per_interval, interval_hours, total_intervals)` — full USDC + STRK fee pulled upfront
-4. A keeper calls `execute_dca(order_id, escrow, ...)` once per interval — commits STRK to Atomiq, which routes BTC to your Bitcoin address
-
-**Execution lifecycle:**
-
-- `DCAExecuted` — STRK committed to Atomiq escrow, interval marked pending
-- `DCAIntervalClaimed` — LP confirmed BTC delivery, interval unlocked for next execution
-- `DCAIntervalRefunded` — LP failed, STRK reclaimed from Atomiq, interval counter rolled back and retried automatically
-
-**Cancelling:**
-
-- Call `cancel_dca(order_id)` — marks order inactive and refunds all remaining unspent USDC + unused STRK keeper fee reserve
-- Already-executed and confirmed intervals are not reversed
-
-**Keeper integration (Gelato-style):**
-
-- `checker(order_id)` returns `(can_exec, payload)` — keeper polls this view and fires when `can_exec` is true
-- `payload.strk_amount` is the live oracle-priced STRK equivalent of `usdc_per_interval` — no keeper-side oracle math needed
-- Keeper needs zero capital and zero approvals; they never touch funds
-
-**Constraints:**
-
-- `usdc_per_interval` ≥ 1 USDC
-- `interval_hours`: 1–720 (1 hour to 30 days)
-- `total_intervals`: 1–1,000
-- `strk_amount` validated within 5% of live oracle price to prevent keeper manipulation
-
-### 2. Deposit
+### 1. Deposit
 
 1. Generate `nullifier` and `secret` offchain
 2. Compute `commitment = Poseidon2(nullifier, secret)`
 3. Save your note `{ nullifier, secret, commitment }` — **required for all future actions**
 4. Approve and call `deposit(commitment)` — locks `1,000 sat` wBTC, inserts leaf into Merkle tree
 
-### 3. ZK Withdraw
+### 2. ZK Withdraw
 
 1. Load your note → frontend reconstructs Merkle tree from indexed deposits
 2. Noir generates a ZK proof of membership without revealing your leaf
@@ -58,7 +23,7 @@ Schedule recurring fixed-dollar BTC purchases at the live Pragma/Chainlink oracl
 
 > `recipient` is bound to the proof via `recipient_hash = Poseidon2(recipient)` — changing it invalidates the proof and prevents frontrunning.
 
-### 4. Yield Earning (Vesu)
+### 3. Yield Earning (Vesu)
 
 1. Load your note → generate ZK proof (same flow as withdraw)
 2. Call `start_earning(proof, recipient)` — marks nullifier spent, deposits wBTC into Vesu lending pool, locks `recipient` on-chain
@@ -67,7 +32,7 @@ Schedule recurring fixed-dollar BTC purchases at the live Pragma/Chainlink oracl
 
 > The link between the original depositor and the yield position is broken by the ZK proof — but the recipient address and share balance are public storage. Once `start_earning` is called, the note is consumed. The only exit is `stop_earning`.
 
-### 5. HTLC Swap (wBTC → STRK)
+### 4. HTLC Swap (wBTC → STRK)
 
 **Alice (wBTC seller):**
 
@@ -107,36 +72,27 @@ The same proof is used for `zk_withdraw_wbtc`, `start_earning`, and `post_wbtc_o
 
 ## Contract Reference
 
-| Function                                                                                | Description                                                                            |
-| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `deposit(commitment)`                                                                   | Lock 1,000 sat wBTC, insert leaf                                                       |
-| `zk_withdraw_wbtc(proof, recipient)`                                                    | Verify proof, withdraw wBTC to recipient                                               |
-| `start_earning(proof, recipient)`                                                       | Opt deposit into Vesu yield, lock recipient                                            |
-| `stop_earning(nullifier_hash)`                                                          | Redeem Vesu shares, receive wBTC + yield                                               |
-| `get_yield_balance(nullifier_hash)`                                                     | Current wBTC value of a Vesu position                                                  |
-| `is_earning(nullifier_hash)`                                                            | Check if a nullifier is in an earning position                                         |
-| `get_yield_recipient(nullifier_hash)`                                                   | Address locked in at start_earning time                                                |
-| `post_wbtc_order(proof, dest, hashlock, expiry, slippage)`                              | Post HTLC swap order                                                                   |
-| `fill_wbtc_order(order_id, bob_expiry)`                                                 | Bob locks STRK at live rate                                                            |
-| `withdraw_strk(order_id, secret)`                                                       | Alice claims STRK, reveals secret on-chain                                             |
-| `withdraw_wbtc(order_id)`                                                               | Bob claims wBTC using revealed secret                                                  |
-| `refund_wbtc(order_id)`                                                                 | Alice reclaims wBTC after expiry                                                       |
-| `refund_strk(order_id)`                                                                 | Bob reclaims STRK after his expiry                                                     |
-| `get_btc_strk_rate()`                                                                   | Live BTC/STRK cross rate from Pragma/Chainlink                                         |
-| `get_quoted_strk_amount()`                                                              | STRK owed for one lot at current price                                                 |
-| `create_dca_order(btc_destination, usdc_per_interval, interval_hours, total_intervals)` | Deposit USDC + STRK fee upfront, schedule recurring BTC purchases to a Bitcoin address |
-| `execute_dca(order_id, escrow, signature, timeout, extra_data)`                         | Keeper: commit STRK to Atomiq escrow for one interval's BTC delivery                   |
-| `refund_dca_interval(order_id)`                                                         | Settle a pending Atomiq escrow — claim (BTC delivered) or refund (LP failed, retry)    |
-| `cancel_dca(order_id)`                                                                  | Cancel active order, refund remaining USDC + STRK fee reserve                          |
-| `checker(order_id)`                                                                     | Keeper resolver: returns `(can_exec, payload)` with live `strk_amount`                 |
-| `preview_btc_for_usdc(usdc_amount)`                                                     | How much wBTC a USDC amount buys at current oracle price                               |
-| `get_dca_order(order_id)`                                                               | Fetch a DCA order by ID                                                                |
-| `get_dca_pending_escrow(order_id)`                                                      | Fetch the pending Atomiq escrow for an order                                           |
-| `dca_interval_needs_refund(order_id)`                                                   | Whether an interval is awaiting escrow settlement                                      |
-| `get_dca_pending_interval_index(order_id)`                                              | Index of the currently pending interval                                                |
-| `current_root()`                                                                        | Latest Merkle root                                                                     |
-| `next_leaf_index()`                                                                     | Total deposits so far                                                                  |
-| `is_known_root(root)`                                                                   | Check if root is in the last 30 roots                                                  |
+| Function                                                   | Description                                              |
+| ---------------------------------------------------------- | -------------------------------------------------------- |
+| `deposit(commitment)`                                      | Lock 1,000 sat wBTC, insert leaf                         |
+| `zk_withdraw_wbtc(proof, recipient)`                       | Verify proof, withdraw wBTC to recipient                 |
+| `start_earning(proof, recipient)`                          | Opt deposit into Vesu yield, lock recipient              |
+| `stop_earning(nullifier_hash)`                             | Redeem Vesu shares, receive wBTC + yield                 |
+| `get_yield_balance(nullifier_hash)`                        | Current wBTC value of a Vesu position                    |
+| `is_earning(nullifier_hash)`                               | Check if a nullifier is in an earning position           |
+| `get_yield_recipient(nullifier_hash)`                      | Address locked in at start_earning time                  |
+| `post_wbtc_order(proof, dest, hashlock, expiry, slippage)` | Post HTLC swap order                                     |
+| `fill_wbtc_order(order_id, bob_expiry)`                    | Bob locks STRK at live rate                              |
+| `withdraw_strk(order_id, secret)`                          | Alice claims STRK, reveals secret on-chain               |
+| `withdraw_wbtc(order_id)`                                  | Bob claims wBTC using revealed secret                    |
+| `refund_wbtc(order_id)`                                    | Alice reclaims wBTC after expiry                         |
+| `refund_strk(order_id)`                                    | Bob reclaims STRK after his expiry                       |
+| `get_btc_strk_rate()`                                      | Live BTC/STRK cross rate from Pragma/Chainlink           |
+| `get_quoted_strk_amount()`                                 | STRK owed for one lot at current price                   |
+| `preview_btc_for_usdc(usdc_amount)`                        | How much wBTC a USDC amount buys at current oracle price |
+| `current_root()`                                           | Latest Merkle root                                       |
+| `next_leaf_index()`                                        | Total deposits so far                                    |
+| `is_known_root(root)`                                      | Check if root is in the last 30 roots                    |
 
 **Token addresses (Sepolia):**
 
@@ -155,28 +111,21 @@ Vesu vToken: 0x05868ed6b7c57ac071bf6bfe762174a2522858b700ba9fb062709e63b65bf186
 contracts/   Cairo contracts (PrivateSwap, IMT, Poseidon2, MockUSDC)
 noir/        ZK circuit (Merkle membership proof)
 indexer/     Checkpoint indexer → GraphQL API
-frontend/    React UI (DCA, Deposit, Withdraw, Swap, Yield tabs)
-keeper/      Automated keeper — polls checker(), builds Atomiq escrow, calls execute_dca
+frontend/    React UI (Deposit, Withdraw, Swap, Yield tabs)
 ```
 
 **Key decisions:**
 
-| Decision                         | Reason                                                                                       |
-| -------------------------------- | -------------------------------------------------------------------------------------------- |
-| Poseidon2 over BN254             | Matches Noir's native hash                                                                   |
-| IMT depth 10                     | ~1,024 deposits (testnet scope)                                                              |
-| Root history (30)                | Withdraw even after new deposits                                                             |
-| Nullifier hash as order ID       | Unique, already on-chain                                                                     |
-| Recipient hash in proof          | Prevents frontrunning on all ZK functions                                                    |
-| Vesu ERC-4626 for yield          | Non-custodial, share-based — yield accrues automatically                                     |
-| USDC (not STRK) for DCA spend    | STRK's dollar value fluctuates; USDC makes `usdc_per_interval` a genuine fixed dollar budget |
-| STRK for keeper fee reserve      | Atomiq escrows are denominated in STRK; contract converts the oracle price internally        |
-| DCA USDC pulled upfront          | Simplifies keeper: no capital, no approvals, no per-execution user interaction               |
-| Atomiq for BTC delivery          | Native BTC to a real Bitcoin address — not a wrapped token on Starknet                       |
-| `dca_interval_needs_refund` flag | Prevents double-execution while an Atomiq escrow is in flight                                |
-| 5% STRK tolerance window         | Prevents keeper from committing a stale or manipulated STRK amount to Atomiq                 |
-| Checkpoint indexer               | Single GraphQL query vs O(n) RPC calls for order and execution history                       |
-| Mock USDC with public mint       | Judges can fund themselves instantly without external faucets                                |
+| Decision                   | Reason                                                                 |
+| -------------------------- | ---------------------------------------------------------------------- |
+| Poseidon2 over BN254       | Matches Noir's native hash                                             |
+| IMT depth 10               | ~1,024 deposits (testnet scope)                                        |
+| Root history (30)          | Withdraw even after new deposits                                       |
+| Nullifier hash as order ID | Unique, already on-chain                                               |
+| Recipient hash in proof    | Prevents frontrunning on all ZK functions                              |
+| Vesu ERC-4626 for yield    | Non-custodial, share-based — yield accrues automatically               |
+| Checkpoint indexer         | Single GraphQL query vs O(n) RPC calls for order and execution history |
+| Mock USDC with public mint | Judges can fund themselves instantly without external faucets          |
 
 **Oracle (Pragma, Chainlink, Sepolia):**
 
@@ -193,7 +142,6 @@ STRK/USD: 0x0a5db422ee7c28beead49303646e44ef9cbb8364eeba4d8af9ac06a3b556937
 
 BTC/STRK rate = (btc_usd × 10^strk_dec × STRK_PRECISION) / (strk_usd × 10^btc_dec)
 wBTC for USDC = usdc_amount × WBTC_PRECISION × 10^btc_dec / (btc_usd × USDC_PRECISION)
-STRK for USDC = usdc_amount × STRK_PRECISION × 10^strk_dec / (strk_usd × USDC_PRECISION)
 ```
 
 Max oracle age: 14 days (testnet) — tighten to 1h for mainnet.
@@ -212,7 +160,7 @@ make install-starknet          # starkup (Cairo toolchain)
 make install-scarb             # Scarb 2.14.0 via asdf
 make install-foundry           # starknet-foundry 0.53.0 via asdf
 make install-garaga            # garaga 1.0.1 (verifier codegen)
-make install-app-deps          # frontend + keeper JS deps
+make install-app-deps          # frontend JS deps
 ```
 
 ### 2. Build the ZK circuit
@@ -238,7 +186,7 @@ make deploy-contract           # yarn deploy
 ```bash
 make artifacts
 # copies circuit.json + vk.bin → frontend/src/assets/
-# copies ABI → indexer/src/abis/ and keeper/src/abis/
+# copies ABI → indexer/src/abis/
 # generates typed ABI → frontend/src/assets/json/abi.ts
 ```
 
@@ -301,9 +249,6 @@ VITE_GRAPH_QL_ENDPOINT=http://localhost:5100/graphql
 - Bob expiry strictly < Alice expiry — HTLC ordering enforced on-chain
 - `swap_initiated` flag — Alice cannot double-spend after secret reveal
 - Rate expiry (1h) + slippage guard — protects Alice from price manipulation at fill time
-- DCA `dca_interval_needs_refund` flag — prevents double-execution while Atomiq escrow is in flight
-- Keeper `strk_amount` validated within 5% of live oracle — prevents manipulation of escrow amount
-- DCA order marked inactive **before** USDC refund transfer in `cancel_dca` (CEI)
 - All admin functions are owner-only (`assert_only_owner`)
 
 > ⚠️ Unaudited testnet demo — do not use with real funds.
