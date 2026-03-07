@@ -1,0 +1,1060 @@
+use starknet::{ContractAddress, get_block_timestamp, get_caller_address, get_contract_address};
+
+mod field;
+mod incremental_merkle_tree;
+mod mockUSDC;
+mod poseidon2;
+mod poseidon2lib;
+mod pragma_oracle;
+use crate::field::FieldTrait;
+use crate::poseidon2lib::Poseidon2Trait;
+
+// -------------------------------------------------------
+// External Interfaces
+// -------------------------------------------------------
+
+#[starknet::interface]
+trait IVerifier<TContractState> {
+    fn verify_ultra_keccak_zk_honk_proof(
+        self: @TContractState, full_proof_with_hints: Span<felt252>,
+    ) -> Result<Span<u256>, felt252>;
+}
+
+#[starknet::interface]
+trait IAggregatorProxy<TContractState> {
+    fn latest_round_data(self: @TContractState) -> Round;
+    fn decimals(self: @TContractState) -> u8;
+}
+
+#[starknet::interface]
+trait IVToken<TContractState> {
+    fn deposit(ref self: TContractState, assets: u256, receiver: ContractAddress) -> u256;
+    fn redeem(
+        ref self: TContractState, shares: u256, receiver: ContractAddress, owner: ContractAddress,
+    ) -> u256;
+    fn convert_to_assets(self: @TContractState, shares: u256) -> u256;
+}
+
+#[starknet::interface]
+trait IMockWBTC<TContractState> {
+    fn mint(ref self: TContractState, recipient: ContractAddress, amount: u256);
+}
+
+// -------------------------------------------------------
+// Shared Data Types
+// -------------------------------------------------------
+
+#[derive(Drop, Serde)]
+struct Round {
+    round_id: felt252,
+    answer: u128,
+    block_num: u64,
+    started_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Drop, Serde, Copy, starknet::Store)]
+struct WbtcOrder {
+    wbtc_seller: ContractAddress,
+    wbtc_buyer: ContractAddress,
+    alice_strk_destination: ContractAddress,
+    hashlock: felt252,
+    wbtc_amount: u256,
+    quoted_strk_amount: u256,
+    slippage_tolerance_bps: u256,
+    expiry: u64,
+    rate_expiry: u64,
+    is_filled: bool,
+    is_withdrawn: bool,
+    is_refunded: bool,
+    swap_initiated: bool,
+    secret: felt252,
+}
+
+#[derive(Drop, Serde, Copy, starknet::Store)]
+struct StrkOrder {
+    strk_seller: ContractAddress,
+    strk_buyer: ContractAddress,
+    hashlock: felt252,
+    strk_amount: u256,
+    expiry: u64,
+    is_withdrawn: bool,
+    is_refunded: bool,
+    wbtc_order_id: u256,
+}
+
+
+// -------------------------------------------------------
+// Public Interface
+// -------------------------------------------------------
+
+#[starknet::interface]
+trait IPrivateSwap<TContractState> {
+    // --- Core pool ---
+    fn deposit(ref self: TContractState, commitment: u256);
+    fn zk_withdraw_wbtc(ref self: TContractState, proof: Span<felt252>, recipient: ContractAddress);
+
+    // --- Yield (Vesu) ---
+    fn start_earning(ref self: TContractState, proof: Span<felt252>, recipient: ContractAddress);
+    fn stop_earning(ref self: TContractState, nullifier_hash: u256);
+    fn get_yield_balance(self: @TContractState, nullifier_hash: u256) -> u256;
+    fn is_earning(self: @TContractState, nullifier_hash: u256) -> bool;
+    fn get_yield_recipient(self: @TContractState, nullifier_hash: u256) -> ContractAddress;
+
+    // --- HTLC swap (wBTC → STRK) ---
+    fn post_wbtc_order(
+        ref self: TContractState,
+        proof: Span<felt252>,
+        alice_strk_destination: ContractAddress,
+        hashlock: felt252,
+        expiry: u64,
+        slippage_tolerance_bps: u256,
+    );
+    fn fill_wbtc_order(ref self: TContractState, wbtc_order_id: u256, bob_expiry: u64);
+    fn withdraw_wbtc(ref self: TContractState, wbtc_order_id: u256);
+    fn withdraw_strk(ref self: TContractState, strk_order_id: u256, secret: felt252);
+    fn refund_wbtc(ref self: TContractState, wbtc_order_id: u256);
+    fn refund_strk(ref self: TContractState, strk_order_id: u256);
+
+    // --- Views ---
+    fn get_wbtc_order(self: @TContractState, order_id: u256) -> WbtcOrder;
+    fn get_strk_order(self: @TContractState, order_id: u256) -> StrkOrder;
+    fn get_btc_usd_price(self: @TContractState) -> (u128, u32);
+    fn get_strk_usd_price(self: @TContractState) -> (u128, u32);
+    fn get_btc_strk_rate(self: @TContractState) -> u256;
+    fn get_quoted_strk_amount(self: @TContractState) -> u256;
+    fn preview_btc_for_usdc(self: @TContractState, usdc_amount: u256) -> u256;
+    fn current_root(self: @TContractState) -> u256;
+    fn next_leaf_index(self: @TContractState) -> u32;
+    fn is_known_root(self: @TContractState, root: u256) -> bool;
+    fn wBTC_address(self: @TContractState) -> ContractAddress;
+    fn strk_address(self: @TContractState) -> ContractAddress;
+    fn usdc_address(self: @TContractState) -> ContractAddress;
+    fn vesu_vtoken_address(self: @TContractState) -> ContractAddress;
+    fn wBTC_denomination(self: @TContractState) -> u256;
+    fn owner(self: @TContractState) -> ContractAddress;
+    fn is_using_pragma(self: @TContractState) -> bool;
+
+    // --- Admin ---
+    fn set_wbtc(ref self: TContractState, wbtc: ContractAddress);
+    fn set_vesu_vtoken(ref self: TContractState, vtoken: ContractAddress);
+    fn withdraw_strk_admin(ref self: TContractState, amount: u256, recipient: ContractAddress);
+    fn set_usdc(ref self: TContractState, usdc: ContractAddress);
+    fn transfer_ownership(ref self: TContractState, new_owner: ContractAddress);
+    fn set_use_pragma(ref self: TContractState, use_pragma: bool);
+}
+
+// -------------------------------------------------------
+// Contract
+// -------------------------------------------------------
+
+#[starknet::contract]
+mod PrivateSwap {
+    use core::pedersen::pedersen;
+    use openzeppelin::token::erc20::interface::{
+        IERC20Dispatcher, IERC20DispatcherTrait, IERC20MetadataDispatcher,
+        IERC20MetadataDispatcherTrait,
+    };
+    use starknet::class_hash::ClassHash;
+    use starknet::storage::{
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
+    use starknet::syscalls::deploy_syscall;
+    use starknet::{SyscallResultTrait, get_tx_info};
+    use crate::incremental_merkle_tree::IncrementalMerkleTreeComponent;
+    use crate::incremental_merkle_tree::IncrementalMerkleTreeComponent::InternalTrait;
+    use crate::pragma_oracle::{
+        AggregationMode, DataType, IPragmaABIDispatcher, IPragmaABIDispatcherTrait,
+        PragmaPricesResponse,
+    };
+    use super::{
+        ContractAddress, FieldTrait, IAggregatorProxyDispatcher,
+        IAggregatorProxyDispatcherTrait, IVTokenDispatcher, IVTokenDispatcherTrait,
+        IVerifierDispatcher, IVerifierDispatcherTrait, Poseidon2Trait, StrkOrder, WbtcOrder,
+        get_block_timestamp, get_caller_address, get_contract_address,
+    };
+
+    component!(path: IncrementalMerkleTreeComponent, storage: imt, event: ImtEvent);
+
+    // -------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------
+
+    const BTC_DENOMINATION: u256 = 1_000;
+
+    const WBTC_PRECISION: u256 = 100_000_000;
+    const STRK_PRECISION: u256 = 1_000_000_000_000_000_000;
+    const USDC_PRECISION: u256 = 1_000_000;
+
+    const TREE_DEPTH: u32 = 10;
+
+    // Universal asset keys — used as the single identifier passed to fetch_oracle_price.
+    // When use_pragma=true  → used directly as Pragma SpotEntry asset id.
+    // When use_pragma=false → looked up in chainlink_feeds map to get the feed address.
+    const BTC_USD: felt252 = 'BTC/USD';
+    const STRK_USD: felt252 = 'STRK/USD';
+
+    // Chainlink feed addresses (Sepolia)
+    const BTC_USD_CHAINLINK: felt252 =
+        0x0258b8f498b767c200577227e3e9f009c9b0fe7f6a3c8c2c24efd588c54747a;
+    const STRK_USD_CHAINLINK: felt252 =
+        0x0a5db422ee7c28beead49303646e44ef9cbb8364eeba4d8af9ac06a3b556937;
+
+    // Pragma oracle address (Sepolia)
+    const PRAGMA_ORACLE_ADDRESS: felt252 =
+        0x036031daa264c24520b11d93af622c848b2499b66b41d611bac95e13cfca131a;
+
+    const ZERO_ADDRESS: ContractAddress = 0.try_into().unwrap();
+
+    // 2 weeks — generous for testnet where feeds update infrequently
+    const MAX_ORACLE_AGE_SECS: u64 = 1_209_600;
+
+    const MIN_EXPIRY_DURATION_SECS: u64 = 3_600;
+    const RATE_VALID_FOR_SECS: u64 = 3_600;
+
+    const MIN_SLIPPAGE_BPS: u256 = 10;
+    const MAX_SLIPPAGE_BPS: u256 = 1_000;
+    const BPS_DENOMINATOR: u256 = 10_000;
+
+    const MIN_STRK_AMOUNT: u256 = 1_000_000_000_000_000_000;
+
+    const VESU_WBTC_ADDRESS: felt252 =
+        0x063d32a3fa6074e72e7a1e06fe78c46a0c8473217773e19f11d8c8cbfc4ff8ca;
+    const VESU_VTOKEN_ADDRESS: felt252 =
+        0x05868ed6b7c57ac071bf6bfe762174a2522858b700ba9fb062709e63b65bf186;
+    const REAL_STRK_ADDRESS: felt252 =
+        0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d;
+    const USDC_ADDRESS: felt252 =
+        0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8;
+
+    // -------------------------------------------------------
+    // Errors
+    // -------------------------------------------------------
+
+    pub mod Errors {
+        pub const INVALID_PROOF: felt252 = 'invalid proof';
+        pub const UNKNOWN_ROOT: felt252 = 'unknown root';
+        pub const NULLIFIER_USED: felt252 = 'nullifier already used';
+        pub const COMMITMENT_USED: felt252 = 'commitment already used';
+        pub const NOT_INTENDED_RECIPIENT: felt252 = 'not intended recipient';
+        pub const INVALID_RECIPIENT: felt252 = 'recipient cannot be zero';
+        pub const WBTC_TRANSFER_FAILED: felt252 = 'wBTC transfer failed';
+        pub const STRK_TRANSFER_FAILED: felt252 = 'STRK transfer failed';
+        pub const USDC_TRANSFER_FAILED: felt252 = 'USDC transfer failed';
+        pub const TRANSFER_FAILED: felt252 = 'token transfer failed';
+        pub const INSUFFICIENT_ALLOWANCE: felt252 = 'insufficient token allowance';
+        pub const NOT_A_WBTC_ORDER: felt252 = 'order_id is not a wBTC order';
+        pub const NOT_A_STRK_ORDER: felt252 = 'order is not a STRK order';
+        pub const ORDER_ALREADY_FILLED: felt252 = 'order already filled';
+        pub const ORDER_EXPIRED: felt252 = 'order has expired';
+        pub const NOT_EXPIRED_YET: felt252 = 'order has not expired yet';
+        pub const ALREADY_WITHDRAWN: felt252 = 'already withdrawn';
+        pub const ALREADY_REFUNDED: felt252 = 'already refunded';
+        pub const SWAP_STARTED: felt252 = 'swap started';
+        pub const EXPIRY_TOO_SOON: felt252 = 'expiry is too soon';
+        pub const BOB_EXPIRY_TOO_LONG: felt252 = 'bob expiry exceeds alice expiry';
+        pub const QUOTED_RATE_EXPIRED: felt252 = 'quoted rate has expired';
+        pub const SLIPPAGE_TOO_HIGH: felt252 = 'price moved since quote';
+        pub const SLIPPAGE_OUT_OF_RANGE: felt252 = 'slippage tolerance out of range';
+        pub const STRK_AMOUNT_TOO_LOW: felt252 = 'strk amount below minimum';
+        pub const SECRET_CANNOT_BE_ZERO: felt252 = 'secret cannot be zero';
+        pub const SECRET_UNKNOWN: felt252 = 'secret not yet revealed';
+        pub const INVALID_SECRET: felt252 = 'secret does not match lock';
+        pub const NOT_THE_BUYER: felt252 = 'caller is not the buyer';
+        pub const ALREADY_EARNING: felt252 = 'nullifier already earning';
+        pub const NOT_EARNING: felt252 = 'nullifier is not earning';
+        pub const NOT_RECIPIENT: felt252 = 'caller is not the recipient';
+        pub const VESU_NOT_CONFIGURED: felt252 = 'vesu vtoken not configured';
+        pub const VESU_DEPOSIT_FAILED: felt252 = 'vesu deposit failed';
+        pub const NOT_OWNER: felt252 = 'caller is not the owner';
+        pub const ZERO_ADDRESS: felt252 = 'new owner cannot be zero';
+        pub const NO_CHAINLINK_FEED: felt252 = 'no chainlink feed for asset';
+        pub const STALE_PRAGMA_PRICE: felt252 = 'stale pragma price';
+        pub const INVALID_PRAGMA_PRICE: felt252 = 'invalid pragma price';
+        pub const STALE_CHAINLINK_PRICE: felt252 = 'stale chainlink price';
+        pub const INVALID_CHAINLINK_PRICE: felt252 = 'invalid chainlink price';
+        pub const BOTH_ORACLES_STALE: felt252 = 'both oracles stale';
+    }
+
+    // -------------------------------------------------------
+    // Storage
+    // -------------------------------------------------------
+
+    #[storage]
+    struct Storage {
+        #[substorage(v0)]
+        imt: IncrementalMerkleTreeComponent::Storage,
+        commitments: Map<u256, bool>,
+        nullifier_hashes: Map<u256, bool>,
+        wbtc_orders: Map<u256, WbtcOrder>,
+        strk_orders: Map<u256, StrkOrder>,
+        nullifier_earning: Map<u256, bool>,
+        nullifier_shares: Map<u256, u256>,
+        nullifier_recipient: Map<u256, ContractAddress>,
+        wBTC: ContractAddress,
+        strk: ContractAddress,
+        usdc: ContractAddress,
+        vesu_vtoken: ContractAddress,
+        verifier: ContractAddress,
+        owner: ContractAddress,
+        // Oracle toggle:
+        //   true  = Pragma primary, Chainlink fallback  (recommended for mainnet)
+        //   false = Chainlink primary, Pragma fallback  (recommended for Sepolia testnet)
+        // Set via constructor `is_mainnet` arg; can be changed by owner via set_use_pragma().
+        use_pragma: bool,
+        // Maps universal asset key ('BTC/USD', 'STRK/USD') → Chainlink feed address.
+        // Populated in constructor; extended by owner via set_chainlink_feed().
+        chainlink_feeds: Map<felt252, felt252>,
+    }
+
+    // -------------------------------------------------------
+    // Events
+    // -------------------------------------------------------
+
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    enum Event {
+        ImtEvent: IncrementalMerkleTreeComponent::Event,
+        Deposit: Deposit,
+        Withdrawal: Withdrawal,
+        YieldStarted: YieldStarted,
+        YieldStopped: YieldStopped,
+        YieldRedeemed: YieldRedeemed,
+        WbtcOrderPosted: WbtcOrderPosted,
+        WbtcOrderFilled: WbtcOrderFilled,
+        WbtcWithdrawn: WbtcWithdrawn,
+        StrkWithdrawn: StrkWithdrawn,
+        WbtcRefunded: WbtcRefunded,
+        StrkRefunded: StrkRefunded,
+        OwnershipTransferred: OwnershipTransferred,
+        OracleToggled: OracleToggled,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Deposit {
+        #[key]
+        commitment: u256,
+        leaf_index: u32,
+        timestamp: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Withdrawal {
+        #[key]
+        recipient: ContractAddress,
+        #[key]
+        nullifier_hash: u256,
+        amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct YieldStarted {
+        #[key]
+        nullifier_hash: u256,
+        recipient: ContractAddress,
+        shares: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct YieldStopped {
+        #[key]
+        nullifier_hash: u256,
+        recipient: ContractAddress,
+        amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct YieldRedeemed {
+        #[key]
+        nullifier_hash: u256,
+        shares: u256,
+        wbtc_returned: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct WbtcOrderPosted {
+        #[key]
+        order_id: u256,
+        wbtc_seller: ContractAddress,
+        alice_strk_destination: ContractAddress,
+        wbtc_amount: u256,
+        quoted_strk_amount: u256,
+        hashlock: felt252,
+        expiry: u64,
+        rate_expiry: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct WbtcOrderFilled {
+        #[key]
+        wbtc_order_id: u256,
+        #[key]
+        strk_order_id: u256,
+        bob: ContractAddress,
+        strk_amount_locked: u256,
+        bob_expiry: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct WbtcWithdrawn {
+        #[key]
+        order_id: u256,
+        wbtc_buyer: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct StrkWithdrawn {
+        #[key]
+        order_id: u256,
+        strk_buyer: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct WbtcRefunded {
+        #[key]
+        order_id: u256,
+        wbtc_seller: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct StrkRefunded {
+        #[key]
+        order_id: u256,
+        strk_seller: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct OwnershipTransferred {
+        previous_owner: ContractAddress,
+        new_owner: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct OracleToggled {
+        use_pragma: bool,
+    }
+
+    // -------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------
+
+    #[constructor]
+    fn constructor(ref self: ContractState, verifier_class_hash: ClassHash) {
+        let tx_info = get_tx_info();
+
+        self.wBTC.write(VESU_WBTC_ADDRESS.try_into().unwrap());
+        self.strk.write(REAL_STRK_ADDRESS.try_into().unwrap());
+        self.usdc.write(USDC_ADDRESS.try_into().unwrap());
+        self.vesu_vtoken.write(VESU_VTOKEN_ADDRESS.try_into().unwrap());
+
+        let (verifier_address, _) = deploy_syscall(verifier_class_hash, 0, array![].span(), false)
+            .unwrap_syscall();
+        self.verifier.write(verifier_address);
+
+        self.imt.initializer(TREE_DEPTH);
+
+        // Map universal asset keys → Chainlink feed addresses.
+        // These are used when use_pragma=false (Chainlink primary path).
+        self.chainlink_feeds.write(BTC_USD, BTC_USD_CHAINLINK);
+        self.chainlink_feeds.write(STRK_USD, STRK_USD_CHAINLINK);
+
+        self.use_pragma.write(true);
+
+        let owner = tx_info.account_contract_address;
+        self.owner.write(owner);
+        self.emit(OwnershipTransferred { previous_owner: ZERO_ADDRESS, new_owner: owner });
+    }
+
+    // -------------------------------------------------------
+    // Implementation
+    // -------------------------------------------------------
+
+    #[abi(embed_v0)]
+    impl PrivateSwapImpl of super::IPrivateSwap<ContractState> {
+        // ---------------------------------------------------
+        // DEPOSIT
+        // ---------------------------------------------------
+        fn deposit(ref self: ContractState, commitment: u256) {
+            assert(!self.commitments.read(commitment), Errors::COMMITMENT_USED);
+
+            let wbtc = IERC20Dispatcher { contract_address: self.wBTC.read() };
+            let ok = wbtc
+                .transfer_from(get_caller_address(), get_contract_address(), BTC_DENOMINATION);
+            assert(ok, Errors::WBTC_TRANSFER_FAILED);
+
+            let leaf_index = self.imt._insert(commitment);
+            self.commitments.write(commitment, true);
+            self.emit(Deposit { commitment, leaf_index, timestamp: get_block_timestamp() });
+        }
+
+        // ---------------------------------------------------
+        // START EARNING
+        // ---------------------------------------------------
+        fn start_earning(
+            ref self: ContractState, proof: Span<felt252>, recipient: ContractAddress,
+        ) {
+            assert(recipient != ZERO_ADDRESS, Errors::INVALID_RECIPIENT);
+
+            let nullifier_hash = self.verify_proof_and_consume(proof, recipient);
+            assert(!self.nullifier_earning.read(nullifier_hash), Errors::ALREADY_EARNING);
+
+            let vtoken_addr = self.vesu_vtoken.read();
+            assert(vtoken_addr != ZERO_ADDRESS, Errors::VESU_NOT_CONFIGURED);
+
+            let this = get_contract_address();
+            IERC20Dispatcher { contract_address: self.wBTC.read() }
+                .approve(vtoken_addr, BTC_DENOMINATION);
+
+            let shares = IVTokenDispatcher { contract_address: vtoken_addr }
+                .deposit(BTC_DENOMINATION, this);
+            assert(shares > 0, Errors::VESU_DEPOSIT_FAILED);
+
+            self.nullifier_earning.write(nullifier_hash, true);
+            self.nullifier_shares.write(nullifier_hash, shares);
+            self.nullifier_recipient.write(nullifier_hash, recipient);
+
+            self.emit(YieldStarted { nullifier_hash, recipient, shares });
+        }
+
+        // ---------------------------------------------------
+        // STOP EARNING
+        // ---------------------------------------------------
+        fn stop_earning(ref self: ContractState, nullifier_hash: u256) {
+            let recipient = self.nullifier_recipient.read(nullifier_hash);
+            assert(recipient != ZERO_ADDRESS, Errors::NOT_EARNING);
+            assert(get_caller_address() == recipient, Errors::NOT_RECIPIENT);
+            assert(self.nullifier_earning.read(nullifier_hash), Errors::NOT_EARNING);
+
+            let amount = self.redeem_vesu_position(nullifier_hash);
+            self.nullifier_recipient.write(nullifier_hash, ZERO_ADDRESS);
+
+            let ok = IERC20Dispatcher { contract_address: self.wBTC.read() }
+                .transfer(recipient, amount);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(YieldStopped { nullifier_hash, recipient, amount });
+        }
+
+        // ---------------------------------------------------
+        // ZK WITHDRAW wBTC
+        // ---------------------------------------------------
+        fn zk_withdraw_wbtc(
+            ref self: ContractState, proof: Span<felt252>, recipient: ContractAddress,
+        ) {
+            let nullifier_hash = self.verify_proof_and_consume(proof, recipient);
+
+            let ok = IERC20Dispatcher { contract_address: self.wBTC.read() }
+                .transfer(recipient, BTC_DENOMINATION);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(Withdrawal { recipient, nullifier_hash, amount: BTC_DENOMINATION });
+        }
+
+        // ---------------------------------------------------
+        // POST WBTC ORDER
+        // ---------------------------------------------------
+        fn post_wbtc_order(
+            ref self: ContractState,
+            proof: Span<felt252>,
+            alice_strk_destination: ContractAddress,
+            hashlock: felt252,
+            expiry: u64,
+            slippage_tolerance_bps: u256,
+        ) {
+            assert(hashlock != pedersen(0, 0), Errors::SECRET_CANNOT_BE_ZERO);
+
+            let nullifier_hash = self.verify_proof_and_consume(proof, alice_strk_destination);
+
+            let now = get_block_timestamp();
+            assert(expiry >= now + MIN_EXPIRY_DURATION_SECS, Errors::EXPIRY_TOO_SOON);
+            assert(
+                slippage_tolerance_bps >= MIN_SLIPPAGE_BPS
+                    && slippage_tolerance_bps <= MAX_SLIPPAGE_BPS,
+                Errors::SLIPPAGE_OUT_OF_RANGE,
+            );
+
+            let quoted_strk_amount = self.get_btc_strk_rate() * BTC_DENOMINATION / WBTC_PRECISION;
+            assert(quoted_strk_amount >= MIN_STRK_AMOUNT, Errors::STRK_AMOUNT_TOO_LOW);
+
+            let rate_expiry = now + RATE_VALID_FOR_SECS;
+
+            self
+                .wbtc_orders
+                .write(
+                    nullifier_hash,
+                    WbtcOrder {
+                        wbtc_seller: get_caller_address(),
+                        wbtc_buyer: ZERO_ADDRESS,
+                        alice_strk_destination,
+                        hashlock,
+                        wbtc_amount: BTC_DENOMINATION,
+                        quoted_strk_amount,
+                        slippage_tolerance_bps,
+                        expiry,
+                        rate_expiry,
+                        is_filled: false,
+                        is_withdrawn: false,
+                        is_refunded: false,
+                        swap_initiated: false,
+                        secret: 0,
+                    },
+                );
+
+            self
+                .emit(
+                    WbtcOrderPosted {
+                        order_id: nullifier_hash,
+                        wbtc_seller: get_caller_address(),
+                        alice_strk_destination,
+                        wbtc_amount: BTC_DENOMINATION,
+                        quoted_strk_amount,
+                        hashlock,
+                        expiry,
+                        rate_expiry,
+                    },
+                );
+        }
+
+        // ---------------------------------------------------
+        // FILL WBTC ORDER
+        // ---------------------------------------------------
+        fn fill_wbtc_order(ref self: ContractState, wbtc_order_id: u256, bob_expiry: u64) {
+            let mut order = self.wbtc_orders.read(wbtc_order_id);
+            let now = get_block_timestamp();
+
+            assert(!order.is_filled, Errors::ORDER_ALREADY_FILLED);
+            assert(!order.is_refunded, Errors::ALREADY_REFUNDED);
+            assert(!order.is_withdrawn, Errors::ALREADY_WITHDRAWN);
+            assert(order.wbtc_amount > 0, Errors::NOT_A_WBTC_ORDER);
+            assert(now < order.expiry, Errors::ORDER_EXPIRED);
+            assert(now <= order.rate_expiry, Errors::QUOTED_RATE_EXPIRED);
+            assert(bob_expiry < order.expiry, Errors::BOB_EXPIRY_TOO_LONG);
+            assert(bob_expiry >= now + MIN_EXPIRY_DURATION_SECS, Errors::EXPIRY_TOO_SOON);
+
+            let live_strk_amount = self.get_btc_strk_rate() * order.wbtc_amount / WBTC_PRECISION;
+            assert(live_strk_amount >= MIN_STRK_AMOUNT, Errors::STRK_AMOUNT_TOO_LOW);
+
+            let min_acceptable = order.quoted_strk_amount
+                * (BPS_DENOMINATOR - order.slippage_tolerance_bps)
+                / BPS_DENOMINATOR;
+            assert(live_strk_amount >= min_acceptable, Errors::SLIPPAGE_TOO_HIGH);
+
+            let bob = get_caller_address();
+            let this = get_contract_address();
+            let strk = IERC20Dispatcher { contract_address: self.strk.read() };
+            assert(strk.allowance(bob, this) >= live_strk_amount, Errors::INSUFFICIENT_ALLOWANCE);
+            let ok = strk.transfer_from(bob, this, live_strk_amount);
+            assert(ok, Errors::STRK_TRANSFER_FAILED);
+
+            order.wbtc_buyer = bob;
+            order.is_filled = true;
+            self.wbtc_orders.write(wbtc_order_id, order);
+
+            let strk_order_id: u256 = pedersen(order.hashlock, 'fill').into();
+            self
+                .strk_orders
+                .write(
+                    strk_order_id,
+                    StrkOrder {
+                        strk_seller: bob,
+                        strk_buyer: order.alice_strk_destination,
+                        hashlock: order.hashlock,
+                        strk_amount: live_strk_amount,
+                        expiry: bob_expiry,
+                        is_withdrawn: false,
+                        is_refunded: false,
+                        wbtc_order_id,
+                    },
+                );
+
+            self
+                .emit(
+                    WbtcOrderFilled {
+                        wbtc_order_id,
+                        strk_order_id,
+                        bob,
+                        strk_amount_locked: live_strk_amount,
+                        bob_expiry,
+                    },
+                );
+        }
+
+        // ---------------------------------------------------
+        // WITHDRAW wBTC
+        // ---------------------------------------------------
+        fn withdraw_wbtc(ref self: ContractState, wbtc_order_id: u256) {
+            let mut order = self.wbtc_orders.read(wbtc_order_id);
+            let caller = get_caller_address();
+
+            assert(!order.is_withdrawn, Errors::ALREADY_WITHDRAWN);
+            assert(!order.is_refunded, Errors::ALREADY_REFUNDED);
+            assert(order.wbtc_buyer == caller, Errors::NOT_THE_BUYER);
+            assert(order.secret != 0, Errors::SECRET_UNKNOWN);
+            assert(
+                get_block_timestamp() < order.expiry || order.swap_initiated, Errors::ORDER_EXPIRED,
+            );
+            assert(pedersen(0, order.secret) == order.hashlock, Errors::INVALID_SECRET);
+
+            order.is_withdrawn = true;
+            self.wbtc_orders.write(wbtc_order_id, order);
+
+            let ok = IERC20Dispatcher { contract_address: self.wBTC.read() }
+                .transfer(caller, order.wbtc_amount);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(WbtcWithdrawn { order_id: wbtc_order_id, wbtc_buyer: caller });
+        }
+
+        // ---------------------------------------------------
+        // WITHDRAW STRK
+        // ---------------------------------------------------
+        fn withdraw_strk(ref self: ContractState, strk_order_id: u256, secret: felt252) {
+            let mut order = self.strk_orders.read(strk_order_id);
+            let caller = get_caller_address();
+
+            assert(secret != 0, Errors::SECRET_CANNOT_BE_ZERO);
+            assert(!order.is_withdrawn, Errors::ALREADY_WITHDRAWN);
+            assert(!order.is_refunded, Errors::ALREADY_REFUNDED);
+            assert(order.strk_buyer == caller, Errors::NOT_THE_BUYER);
+            assert(get_block_timestamp() < order.expiry, Errors::ORDER_EXPIRED);
+            assert(pedersen(0, secret) == order.hashlock, Errors::INVALID_SECRET);
+
+            let mut wbtc_order = self.wbtc_orders.read(order.wbtc_order_id);
+            wbtc_order.swap_initiated = true;
+            wbtc_order.secret = secret;
+            self.wbtc_orders.write(order.wbtc_order_id, wbtc_order);
+
+            order.is_withdrawn = true;
+            self.strk_orders.write(strk_order_id, order);
+
+            let ok = IERC20Dispatcher { contract_address: self.strk.read() }
+                .transfer(caller, order.strk_amount);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(StrkWithdrawn { order_id: strk_order_id, strk_buyer: caller });
+        }
+
+        // ---------------------------------------------------
+        // REFUND wBTC
+        // ---------------------------------------------------
+        fn refund_wbtc(ref self: ContractState, wbtc_order_id: u256) {
+            let mut order = self.wbtc_orders.read(wbtc_order_id);
+            assert(order.wbtc_amount > 0, Errors::NOT_A_WBTC_ORDER);
+            assert(!order.is_withdrawn, Errors::ALREADY_WITHDRAWN);
+            assert(!order.is_refunded, Errors::ALREADY_REFUNDED);
+            assert(!order.swap_initiated, Errors::SWAP_STARTED);
+            assert(get_block_timestamp() >= order.expiry, Errors::NOT_EXPIRED_YET);
+
+            order.is_refunded = true;
+            self.wbtc_orders.write(wbtc_order_id, order);
+
+            let ok = IERC20Dispatcher { contract_address: self.wBTC.read() }
+                .transfer(order.wbtc_seller, order.wbtc_amount);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(WbtcRefunded { order_id: wbtc_order_id, wbtc_seller: order.wbtc_seller });
+        }
+
+        // ---------------------------------------------------
+        // REFUND STRK
+        // ---------------------------------------------------
+        fn refund_strk(ref self: ContractState, strk_order_id: u256) {
+            let mut order = self.strk_orders.read(strk_order_id);
+            assert(order.strk_amount > 0, Errors::NOT_A_STRK_ORDER);
+            assert(!order.is_withdrawn, Errors::ALREADY_WITHDRAWN);
+            assert(!order.is_refunded, Errors::ALREADY_REFUNDED);
+            assert(get_block_timestamp() >= order.expiry, Errors::NOT_EXPIRED_YET);
+
+            order.is_refunded = true;
+            self.strk_orders.write(strk_order_id, order);
+
+            let ok = IERC20Dispatcher { contract_address: self.strk.read() }
+                .transfer(order.strk_seller, order.strk_amount);
+            assert(ok, Errors::TRANSFER_FAILED);
+
+            self.emit(StrkRefunded { order_id: strk_order_id, strk_seller: order.strk_seller });
+        }
+
+        // ---------------------------------------------------
+        // Views
+        // ---------------------------------------------------
+
+        fn owner(self: @ContractState) -> ContractAddress {
+            self.owner.read()
+        }
+
+        fn wBTC_address(self: @ContractState) -> ContractAddress {
+            self.wBTC.read()
+        }
+
+        fn strk_address(self: @ContractState) -> ContractAddress {
+            self.strk.read()
+        }
+
+        fn usdc_address(self: @ContractState) -> ContractAddress {
+            self.usdc.read()
+        }
+
+        fn vesu_vtoken_address(self: @ContractState) -> ContractAddress {
+            self.vesu_vtoken.read()
+        }
+
+        fn wBTC_denomination(self: @ContractState) -> u256 {
+            BTC_DENOMINATION
+        }
+
+        fn get_wbtc_order(self: @ContractState, order_id: u256) -> WbtcOrder {
+            self.wbtc_orders.read(order_id)
+        }
+
+        fn get_strk_order(self: @ContractState, order_id: u256) -> StrkOrder {
+            self.strk_orders.read(order_id)
+        }
+
+        fn get_yield_balance(self: @ContractState, nullifier_hash: u256) -> u256 {
+            if !self.nullifier_earning.read(nullifier_hash) {
+                return 0;
+            }
+            let vtoken_addr = self.vesu_vtoken.read();
+            if vtoken_addr == ZERO_ADDRESS {
+                return 0;
+            }
+            let shares = self.nullifier_shares.read(nullifier_hash);
+            IVTokenDispatcher { contract_address: vtoken_addr }.convert_to_assets(shares)
+        }
+
+        fn is_earning(self: @ContractState, nullifier_hash: u256) -> bool {
+            self.nullifier_earning.read(nullifier_hash)
+        }
+
+        fn get_yield_recipient(self: @ContractState, nullifier_hash: u256) -> ContractAddress {
+            self.nullifier_recipient.read(nullifier_hash)
+        }
+
+        fn get_btc_usd_price(self: @ContractState) -> (u128, u32) {
+            self.fetch_oracle_price(BTC_USD)
+        }
+
+        fn get_strk_usd_price(self: @ContractState) -> (u128, u32) {
+            self.fetch_oracle_price(STRK_USD)
+        }
+
+        fn get_btc_strk_rate(self: @ContractState) -> u256 {
+            let (btc_usd, btc_dec) = self.fetch_oracle_price(BTC_USD);
+            let (strk_usd, strk_dec) = self.fetch_oracle_price(STRK_USD);
+            assert(btc_usd > 0, 'invalid BTC price');
+            assert(strk_usd > 0, 'invalid STRK price');
+            (btc_usd.into() * self.pow10(strk_dec.into()) * STRK_PRECISION)
+                / (strk_usd.into() * self.pow10(btc_dec.into()))
+        }
+
+        fn get_quoted_strk_amount(self: @ContractState) -> u256 {
+            self.get_btc_strk_rate() * BTC_DENOMINATION / WBTC_PRECISION
+        }
+
+        fn preview_btc_for_usdc(self: @ContractState, usdc_amount: u256) -> u256 {
+            self.btc_for_usdc(usdc_amount)
+        }
+
+        fn current_root(self: @ContractState) -> u256 {
+            self.imt.current_root()
+        }
+
+        fn next_leaf_index(self: @ContractState) -> u32 {
+            self.imt.next_leaf_index()
+        }
+
+        fn is_known_root(self: @ContractState, root: u256) -> bool {
+            self.imt.is_known_root(root)
+        }
+
+        fn is_using_pragma(self: @ContractState) -> bool {
+            self.use_pragma.read()
+        }
+
+        // ---------------------------------------------------
+        // Admin
+        // ---------------------------------------------------
+
+        fn set_wbtc(ref self: ContractState, wbtc: ContractAddress) {
+            self.assert_only_owner();
+            let meta = IERC20MetadataDispatcher { contract_address: wbtc };
+            assert(meta.decimals() == 8, 'mock wBTC must have 8 decimals');
+            self.wBTC.write(wbtc);
+        }
+
+        fn set_vesu_vtoken(ref self: ContractState, vtoken: ContractAddress) {
+            self.assert_only_owner();
+            self.vesu_vtoken.write(vtoken);
+        }
+
+        fn withdraw_strk_admin(ref self: ContractState, amount: u256, recipient: ContractAddress) {
+            self.assert_only_owner();
+            assert(recipient != ZERO_ADDRESS, Errors::ZERO_ADDRESS);
+            let ok = IERC20Dispatcher { contract_address: self.strk.read() }
+                .transfer(recipient, amount);
+            assert(ok, Errors::STRK_TRANSFER_FAILED);
+        }
+
+        fn set_usdc(ref self: ContractState, usdc: ContractAddress) {
+            self.assert_only_owner();
+            let meta = IERC20MetadataDispatcher { contract_address: usdc };
+            assert(meta.decimals() == 6, 'USDC must have 6 decimals');
+            self.usdc.write(usdc);
+        }
+
+        fn transfer_ownership(ref self: ContractState, new_owner: ContractAddress) {
+            self.assert_only_owner();
+            assert(new_owner != ZERO_ADDRESS, Errors::ZERO_ADDRESS);
+            let previous = self.owner.read();
+            self.owner.write(new_owner);
+            self.emit(OwnershipTransferred { previous_owner: previous, new_owner });
+        }
+
+        fn set_use_pragma(ref self: ContractState, use_pragma: bool) {
+            self.assert_only_owner();
+            self.use_pragma.write(use_pragma);
+            self.emit(OracleToggled { use_pragma });
+        }
+    }
+
+    // -------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------
+
+    #[generate_trait]
+    impl Private of PrivateTrait {
+        fn assert_only_owner(self: @ContractState) {
+            assert(get_caller_address() == self.owner.read(), Errors::NOT_OWNER);
+        }
+
+        fn verify_proof_and_consume(
+            ref self: ContractState, proof: Span<felt252>, recipient: ContractAddress,
+        ) -> u256 {
+            let verifier = IVerifierDispatcher { contract_address: self.verifier.read() };
+            let result = verifier.verify_ultra_keccak_zk_honk_proof(proof);
+            assert(result.is_ok(), Errors::INVALID_PROOF);
+
+            let out = result.unwrap();
+            let root: u256 = *out.at(0);
+            let nullifier_hash: u256 = *out.at(1);
+            let recipient_hash: u256 = *out.at(2);
+
+            let computed = Poseidon2Trait::hash_1(FieldTrait::from_address(recipient));
+            assert(computed.inner() == recipient_hash, Errors::NOT_INTENDED_RECIPIENT);
+
+            assert(self.imt.is_known_root(root), Errors::UNKNOWN_ROOT);
+            assert(!self.nullifier_hashes.read(nullifier_hash), Errors::NULLIFIER_USED);
+            self.nullifier_hashes.write(nullifier_hash, true);
+
+            nullifier_hash
+        }
+
+        fn redeem_vesu_position(ref self: ContractState, nullifier_hash: u256) -> u256 {
+            let vtoken_addr = self.vesu_vtoken.read();
+            let shares = self.nullifier_shares.read(nullifier_hash);
+            let this = get_contract_address();
+
+            self.nullifier_earning.write(nullifier_hash, false);
+            self.nullifier_shares.write(nullifier_hash, 0);
+
+            let wbtc_returned = IVTokenDispatcher { contract_address: vtoken_addr }
+                .redeem(shares, this, this);
+
+            self.emit(YieldRedeemed { nullifier_hash, shares, wbtc_returned });
+            wbtc_returned
+        }
+
+        // -------------------------------------------------------
+        // UNIFIED ORACLE FETCH
+        //
+        // Takes a universal asset key ('BTC/USD' or 'STRK/USD').
+        //
+        // use_pragma=true  (mainnet):
+        //   1. Try Pragma  — accurate, native Starknet oracle
+        //   2. Fallback    → Chainlink if Pragma is stale
+        //
+        // use_pragma=false (testnet):
+        //   1. Try Chainlink — closer to real price on Sepolia
+        //   2. Fallback      → Pragma if Chainlink is stale
+        //
+        // Reverts with BOTH_ORACLES_STALE if neither is fresh.
+        // -------------------------------------------------------
+        fn fetch_oracle_price(self: @ContractState, asset_key: felt252) -> (u128, u32) {
+            let (primary, fallback) = if self.use_pragma.read() {
+                (self.try_pragma_price(asset_key), self.try_chainlink_price(asset_key))
+            } else {
+                (self.try_chainlink_price(asset_key), self.try_pragma_price(asset_key))
+            };
+
+            primary.unwrap_or(fallback.expect(Errors::BOTH_ORACLES_STALE))
+        }
+
+        fn try_pragma_price(self: @ContractState, asset_key: felt252) -> Option<(u128, u32)> {
+            let oracle = IPragmaABIDispatcher {
+                contract_address: PRAGMA_ORACLE_ADDRESS.try_into().unwrap(),
+            };
+            let output: PragmaPricesResponse = oracle
+                .get_data(DataType::SpotEntry(asset_key), AggregationMode::Median);
+
+            if output.price > 0 && output.last_updated_timestamp
+                + MAX_ORACLE_AGE_SECS >= get_block_timestamp() {
+                Option::Some((output.price, output.decimals))
+            } else {
+                Option::None
+            }
+        }
+
+        fn try_chainlink_price(self: @ContractState, asset_key: felt252) -> Option<(u128, u32)> {
+            let feed_address = self.chainlink_feeds.read(asset_key);
+            assert(feed_address != 0, Errors::NO_CHAINLINK_FEED);
+            let feed = IAggregatorProxyDispatcher {
+                contract_address: feed_address.try_into().unwrap(),
+            };
+            let round = feed.latest_round_data();
+
+            if round.answer > 0 && round.updated_at + MAX_ORACLE_AGE_SECS >= get_block_timestamp() {
+                Option::Some((round.answer, feed.decimals().into()))
+            } else {
+                Option::None
+            }
+        }
+
+        fn btc_for_usdc(self: @ContractState, usdc_amount: u256) -> u256 {
+            let (btc_usd, btc_dec) = self.fetch_oracle_price(BTC_USD);
+            usdc_amount
+                * WBTC_PRECISION
+                * self.pow10(btc_dec.into())
+                / (btc_usd.into() * USDC_PRECISION)
+        }
+
+        fn pow10(self: @ContractState, n: u256) -> u256 {
+            match n {
+                0 => 1,
+                1 => 10,
+                2 => 100,
+                3 => 1_000,
+                4 => 10_000,
+                5 => 100_000,
+                6 => 1_000_000,
+                7 => 10_000_000,
+                8 => 100_000_000,
+                9 => 1_000_000_000,
+                10 => 10_000_000_000,
+                11 => 100_000_000_000,
+                12 => 1_000_000_000_000,
+                18 => 1_000_000_000_000_000_000,
+                _ => {
+                    let mut result: u256 = 1;
+                    let mut i: u256 = 0;
+                    while i < n {
+                        result *= 10;
+                        i += 1;
+                    }
+                    result
+                },
+            }
+        }
+    }
+}
