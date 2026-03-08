@@ -273,7 +273,7 @@ export default function UmbraHome() {
             ZK privacy
             <br />
             <span style={{ color: "#2a2a3e" }}>
-              · Pragma/Chainlink oracle · Atomic swaps
+              · Pragma/Chainlink oracle ·
             </span>
           </p>
 
