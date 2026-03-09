@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "react-toastify";
 import { useAccount, useContract, useReadContract } from "@starknet-react/core";
-import { CallData, encode, uint256, type Call } from "starknet";
-import { FaSpinner, FaBitcoin, FaDownload, FaFaucet } from "react-icons/fa";
+import { CallData, uint256, type Call } from "starknet";
+import {
+  FaSpinner,
+  FaBitcoin,
+  FaDownload,
+  FaFaucet,
+  FaCopy,
+} from "react-icons/fa";
 import { RiShieldKeyholeFill, RiEyeOffFill } from "react-icons/ri";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 import abi from "../../assets/json/abi";
@@ -15,12 +21,24 @@ import {
   btnPrimary,
 } from "./shared";
 import { assertReceiptSuccess } from "../../utils/helpers";
+import { encryptNote } from "../../helpers/encrypt";
 
-// Vesu's wBTC on Sepolia — publicly mintable, no role required
 const VESU_WBTC =
   "0x063d32a3fa6074e72e7a1e06fe78c46a0c8473217773e19f11d8c8cbfc4ff8ca";
-// Mint 0.001 wBTC (1_000 sat) — exactly one deposit lot
 const MINT_AMOUNT = 1_000n * 100000000n;
+
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:4000";
+
+async function pinToIPFS(encrypted: string): Promise<string> {
+  const res = await fetch(`${BACKEND_URL}/pin`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encrypted }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "Failed to pin to IPFS");
+  return data.cid;
+}
 
 interface DepositTabProps {
   payoutDisplay: string;
@@ -39,6 +57,8 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
   const [depositLoading, setDepositLoading] = useState(false);
   const [mintLoading, setMintLoading] = useState(false);
   const [BTCDenomination, setBTCDenomination] = useState(0);
+  const [cid, setCid] = useState("");
+  const [cidCopied, setCidCopied] = useState(false);
 
   const { data: wbtcDenom } = useReadContract({
     abi,
@@ -88,9 +108,13 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
     toast.success("Note saved — keep this file safe!");
   }, [nullifier, secret, commitment]);
 
-  // ── Mint test wBTC ─────────────────────────────────────────────────────────
-  // Vesu's Sepolia wBTC has no minter role — anyone can call mint().
-  // We mint exactly BTC_DENOMINATION (1 000 sat) — one deposit lot.
+  const copyCid = useCallback(() => {
+    if (!cid) return;
+    navigator.clipboard.writeText(cid);
+    setCidCopied(true);
+    setTimeout(() => setCidCopied(false), 2000);
+  }, [cid]);
+
   const handleMint = async () => {
     if (!account || !address) return toast.error("Connect your wallet.");
     setMintLoading(true);
@@ -98,18 +122,15 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
     try {
       const amountU256 = uint256.bnToUint256(MINT_AMOUNT);
       const callData = CallData.compile([address, amountU256]);
-
       const contractData: Call = {
         contractAddress: VESU_WBTC,
         entrypoint: "mint",
         calldata: callData,
       };
-
       await account.estimateInvokeFee(contractData);
       const tx = await account.execute([contractData], {
         maxFee: 1_000_000_000_000_000n,
       });
-
       await account.waitForTransaction(tx.transaction_hash);
       toast.update(toastId, {
         render: `Minted ${Number(MINT_AMOUNT)} sat wBTC to your wallet!`,
@@ -122,7 +143,6 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
         err?.baseError?.data?.execution_error?.error ??
         err?.message ??
         String(err);
-
       toast.update(toastId, {
         render: executionError,
         isLoading: false,
@@ -154,15 +174,12 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
         setStep(3);
         return;
       }
-
       const callData = [CONTRACT_ADDRESS, BTCDenomination, 0];
-
       const contractData: Call = {
         contractAddress: wBTCAddress.toString(),
         entrypoint: "approve",
         calldata: callData,
       };
-
       await account.estimateInvokeFee(contractData);
       const approveTx = await account.execute([contractData]);
       const receipt = await account.waitForTransaction(
@@ -187,14 +204,30 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
     setDepositLoading(true);
     try {
       const commitData = uint256.bnToUint256(BigInt(commitment));
-
       const populate = contract.populate("deposit", [commitData]);
-
       await account.estimateInvokeFee([populate]);
       const tx = await account.execute([populate]);
       const receipt = await account.waitForTransaction(tx.transaction_hash);
       assertReceiptSuccess(receipt);
       toast.success("Deposited into Umbra pool!");
+
+      // Encrypt note and pin to IPFS — non-blocking
+      try {
+        const encrypted = await encryptNote(account, {
+          nullifier,
+          secret,
+          commitment,
+        });
+        const ipfsCid = await pinToIPFS(encrypted);
+        setCid(ipfsCid);
+        toast.success("Note encrypted and pinned to IPFS!");
+      } catch (ipfsErr: any) {
+        toast.warning(
+          "Deposit succeeded but IPFS pin failed — download your note as backup.",
+        );
+        console.error("IPFS pin error:", ipfsErr?.message);
+      }
+
       setStep(4);
     } catch (err: any) {
       const executionError =
@@ -209,7 +242,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      {/* ── Faucet card ─────────────────────────────────────────────────────── */}
+      {/* Faucet card */}
       <div
         style={{
           background: "#111118",
@@ -407,13 +440,12 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
                 <FaSpinner
                   size={13}
                   style={{ animation: "spin 1s linear infinite" }}
-                />
+                />{" "}
                 Approving…
               </>
             ) : (
               <>
-                <FaBitcoin size={13} />
-                Approve {BTCDenomination / 10 ** 8} wBTC
+                <FaBitcoin size={13} /> Approve {BTCDenomination / 10 ** 8} wBTC
               </>
             )}
           </button>
@@ -489,13 +521,12 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
                 <FaSpinner
                   size={13}
                   style={{ animation: "spin 1s linear infinite" }}
-                />
+                />{" "}
                 Depositing…
               </>
             ) : (
               <>
-                <RiShieldKeyholeFill size={14} />
-                Deposit into Pool
+                <RiShieldKeyholeFill size={14} /> Deposit into Pool
               </>
             )}
           </button>
@@ -523,13 +554,13 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
             borderRadius: 10,
             padding: "2rem 1.5rem",
             textAlign: "center",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "0.85rem",
           }}
         >
-          <RiShieldKeyholeFill
-            size={30}
-            color="#ffc800"
-            style={{ marginBottom: "0.85rem" }}
-          />
+          <RiShieldKeyholeFill size={30} color="#ffc800" />
           <div
             style={{
               color: "#ffc800",
@@ -540,25 +571,98 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
           >
             Deposited into Umbra
           </div>
-          <div
-            style={{
-              color: "#555",
-              fontSize: "0.72rem",
-              marginTop: "0.5rem",
-              lineHeight: 1.7,
-            }}
-          >
+          <div style={{ color: "#555", fontSize: "0.72rem", lineHeight: 1.7 }}>
             Your note is your key to withdraw. Use the Withdraw tab from any
             wallet — no link will ever appear on-chain.
           </div>
+
+          {/* IPFS CID box */}
+          {cid ? (
+            <div
+              style={{
+                width: "100%",
+                background: "#0a0a0f",
+                border: "1px solid rgba(255,200,0,0.2)",
+                borderRadius: 8,
+                padding: "0.85rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.5rem",
+                textAlign: "left",
+              }}
+            >
+              <div
+                style={{
+                  color: "#3a3a4a",
+                  fontSize: "0.58rem",
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                }}
+              >
+                IPFS CID — save this to recover your note from any wallet
+              </div>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+              >
+                <div
+                  style={{
+                    flex: 1,
+                    color: "#ffc800",
+                    fontSize: "0.65rem",
+                    fontFamily: "'DM Mono', monospace",
+                    wordBreak: "break-all",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {cid}
+                </div>
+                <button
+                  onClick={copyCid}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid #2a2a3a",
+                    borderRadius: 6,
+                    padding: "0.4rem 0.6rem",
+                    color: cidCopied ? "#22c55e" : "#555",
+                    cursor: "pointer",
+                    flexShrink: 0,
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <FaCopy size={11} />
+                </button>
+              </div>
+              <div
+                style={{
+                  color: "#2a2a3a",
+                  fontSize: "0.58rem",
+                  lineHeight: 1.6,
+                }}
+              >
+                Your note is encrypted with your wallet key. Paste this CID in
+                the Withdraw tab to recover it.
+              </div>
+            </div>
+          ) : (
+            <div
+              style={{
+                width: "100%",
+                background: "#0a0a0f",
+                border: "1px solid #1e1e2e",
+                borderRadius: 8,
+                padding: "0.75rem",
+                color: "#3a3a4a",
+                fontSize: "0.65rem",
+                textAlign: "center",
+              }}
+            >
+              IPFS pin unavailable — use the JSON download below as backup
+            </div>
+          )}
+
           <button
             onClick={downloadNote}
-            style={{
-              ...btnGhost,
-              marginTop: "1.25rem",
-              width: "auto",
-              padding: "0.6rem 1.25rem",
-            }}
+            style={{ ...btnGhost, width: "auto", padding: "0.6rem 1.25rem" }}
           >
             <FaDownload size={11} />
             Re-download note

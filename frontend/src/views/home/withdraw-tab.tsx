@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { toast } from "react-toastify";
 import { useAccount, useContract, useReadContract } from "@starknet-react/core";
-import { FaSpinner, FaUpload } from "react-icons/fa";
+import { FaSpinner, FaUpload, FaCloudDownloadAlt } from "react-icons/fa";
 import { RiShieldKeyholeFill } from "react-icons/ri";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 import abi from "../../assets/json/abi";
@@ -16,17 +16,25 @@ import {
   inputStyle,
 } from "./shared";
 import { assertReceiptSuccess } from "../../utils/helpers";
+import { decryptNote } from "../../helpers/encrypt";
+
+const PINATA_GATEWAY =
+  import.meta.env.VITE_PINATA_GATEWAY ?? "https://gateway.pinata.cloud";
 
 export default function WithdrawTab() {
   const { address, account } = useAccount();
   const { contract } = useContract({ abi, address: CONTRACT_ADDRESS });
   const { generateProof } = useZkVerifier();
-  const { fetchAllCommitments } = useIndexerDeposits(); // ← replaces provider.getEvents
+  const { fetchAllCommitments } = useIndexerDeposits();
 
   const [withdrawNote, setWithdrawNote] = useState("");
   const [recipient, setRecipient] = useState("");
   const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
+
+  // IPFS recovery state
+  const [cid, setCid] = useState("");
+  const [fetchLoading, setFetchLoading] = useState(false);
 
   const { data: wbtcDenom } = useReadContract({
     abi,
@@ -39,9 +47,31 @@ export default function WithdrawTab() {
     ? `${(Number(wbtcDenom as bigint) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })}wBTC`
     : "—";
 
+  // ── Recover note from IPFS CID ────────────────────────────────────────────
+  const handleFetchNote = async () => {
+    if (!account || !cid.trim()) return;
+    setFetchLoading(true);
+    try {
+      const res = await fetch(`${PINATA_GATEWAY}/ipfs/${cid.trim()}`);
+      if (!res.ok) throw new Error(`Gateway error: ${res.status}`);
+      const { encrypted } = await res.json();
+      if (!encrypted)
+        throw new Error("Invalid IPFS payload — missing encrypted field");
+
+      const note = await decryptNote(account, encrypted);
+      setWithdrawNote(JSON.stringify(note, null, 2));
+      toast.success("Note recovered from IPFS!");
+    } catch (err: any) {
+      toast.error(
+        err?.message ?? "Failed to decrypt — wrong wallet or invalid CID.",
+      );
+    } finally {
+      setFetchLoading(false);
+    }
+  };
+
   const handleWithdraw = async (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!account || !contract) {
       toast.error("Connect your wallet.");
       return;
@@ -52,11 +82,7 @@ export default function WithdrawTab() {
 
     try {
       const note: CommitmentData = JSON.parse(withdrawNote);
-
-      // ── Indexer replaces provider.getEvents for Deposit ──────────────────
       const commitments = await fetchAllCommitments();
-      // ─────────────────────────────────────────────────────────────────────
-
       const noteCommitment = BigInt(note.commitment).toString();
       const tree = await merkleTree(commitments);
       const leafIndex = tree.getIndex(noteCommitment);
@@ -66,7 +92,6 @@ export default function WithdrawTab() {
       const merkleProof = tree.proof(leafIndex);
       const nullifierHash =
         "0x" + poseidon2Hash([BigInt(note.nullifier)]).toString(16);
-
       const recipientHash =
         "0x" + poseidon2Hash([BigInt(recipient)]).toString(16);
 
@@ -99,12 +124,12 @@ export default function WithdrawTab() {
 
       await account.estimateInvokeFee([populate]);
       const tx = await account.execute([populate]);
-
       const receipt = await account.waitForTransaction(tx.transaction_hash);
       assertReceiptSuccess(receipt);
-      toast.success("Withdrawn! STRK sent to your wallet 🎉");
+      toast.success("Withdrawn! wBTC sent to your wallet 🎉");
       setWithdrawNote("");
       setRecipient("");
+      setCid("");
     } catch (err: any) {
       const msg =
         err?.baseError?.data?.execution_error?.error ??
@@ -112,7 +137,6 @@ export default function WithdrawTab() {
         String(err);
       toast.error(msg);
       setWithdrawError(msg);
-      toast.error("Withdrawal failed.");
     } finally {
       setWithdrawLoading(false);
     }
@@ -145,6 +169,84 @@ export default function WithdrawTab() {
           generated locally. Your nullifier and secret never leave your browser.
           The on-chain verifier only sees the Garaga proof.
         </div>
+      </div>
+
+      {/* IPFS recovery */}
+      <div
+        style={{
+          background: "#111118",
+          border: "1px solid #1e1e2e",
+          borderRadius: 10,
+          padding: "1.25rem",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.65rem",
+        }}
+      >
+        <label
+          style={{
+            color: "#3a3a4a",
+            fontSize: "0.6rem",
+            letterSpacing: "0.15em",
+            textTransform: "uppercase",
+          }}
+        >
+          Recover note from IPFS
+        </label>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <input
+            value={cid}
+            onChange={(e) => setCid(e.target.value)}
+            placeholder="Paste your IPFS CID…"
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button
+            type="button"
+            onClick={handleFetchNote}
+            disabled={fetchLoading || !cid.trim() || !account}
+            style={{
+              ...btnPrimary(!!(cid.trim() && !fetchLoading && account)),
+              width: "auto",
+              padding: "0.6rem 1rem",
+              flexShrink: 0,
+            }}
+          >
+            {fetchLoading ? (
+              <FaSpinner
+                size={11}
+                style={{ animation: "spin 1s linear infinite" }}
+              />
+            ) : (
+              <FaCloudDownloadAlt size={13} />
+            )}
+            &nbsp;{fetchLoading ? "Decrypting…" : "Recover"}
+          </button>
+        </div>
+        <p
+          style={{
+            color: "#2a2a3a",
+            fontSize: "0.6rem",
+            margin: 0,
+            letterSpacing: "0.06em",
+          }}
+        >
+          Sign with the same wallet used to deposit — your key decrypts the note
+        </p>
+      </div>
+
+      {/* Divider */}
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+        <div style={{ flex: 1, height: 1, background: "#1e1e2e" }} />
+        <span
+          style={{
+            color: "#2a2a3a",
+            fontSize: "0.6rem",
+            letterSpacing: "0.12em",
+          }}
+        >
+          OR
+        </span>
+        <div style={{ flex: 1, height: 1, background: "#1e1e2e" }} />
       </div>
 
       {/* Note input */}
@@ -351,7 +453,6 @@ export default function WithdrawTab() {
         </div>
       )}
 
-      {/* Wallet warning */}
       {!address && (
         <div
           style={{
@@ -388,13 +489,12 @@ export default function WithdrawTab() {
             <FaSpinner
               size={13}
               style={{ animation: "spin 1s linear infinite" }}
-            />
+            />{" "}
             Generating ZK proof…
           </>
         ) : (
           <>
-            <RiShieldKeyholeFill size={14} />
-            Generate proof & withdraw
+            <RiShieldKeyholeFill size={14} /> Generate proof & withdraw
           </>
         )}
       </button>
