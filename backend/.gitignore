@@ -7,7 +7,3 @@ dist-ssr
 logs
 *.rdb
 build
-coverage
-secrets/
-# keystore file
-keystore.json
