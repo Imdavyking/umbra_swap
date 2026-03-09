@@ -38,15 +38,20 @@ checkpoint.addIndexer("sepolia", config, sepoliaIndexer);
 
 async function run() {
   await checkpoint.reset();
+
+  const app = express();
+  app.use(express.json({ limit: "4mb" }));
+  app.use(express.urlencoded({ limit: "4mb", extended: false }));
+  app.use(cors({ maxAge: 86400 }));
+  app.use("/", checkpoint.graphql);
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`Listening at http://localhost:${PORT}`));
+
   await checkpoint.start();
 }
-run();
 
-const app = express();
-app.use(express.json({ limit: "4mb" }));
-app.use(express.urlencoded({ limit: "4mb", extended: false }));
-app.use(cors({ maxAge: 86400 }));
-app.use("/", checkpoint.graphql);
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening at http://localhost:${PORT}`));
+run().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
