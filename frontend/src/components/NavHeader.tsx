@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
-import { useState, useRef, useEffect } from "react";
-import { Menu, X, ChevronDown } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Menu, X } from "lucide-react";
 import ConnectWalletButton from "./ConnectWalletButton";
 
 type NavLink = {
@@ -13,20 +13,11 @@ const adminLinks: NavLink[] = [];
 
 const NavHeader = () => {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [adminDropdown, setAdminDropdown] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
 
   // Close dropdown on outside click
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (
-        dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as Node)
-      ) {
-        setAdminDropdown(false);
-      }
-    };
+    const handler = (_: MouseEvent) => {};
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
@@ -34,7 +25,6 @@ const NavHeader = () => {
   // Close mobile menu on route change
   useEffect(() => {
     setMenuOpen(false);
-    setAdminDropdown(false);
   }, [location.pathname]);
 
   const renderLinks = (links: NavLink[], isMobile = false) =>

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { toast } from "react-toastify";
 import { useAccount, useContract, useReadContract } from "@starknet-react/core";
-import { FaSpinner, FaUpload, FaCloudDownloadAlt } from "react-icons/fa";
+import { FaSpinner } from "react-icons/fa";
 import { RiShieldKeyholeFill } from "react-icons/ri";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 import abi from "../../assets/json/abi";
@@ -9,17 +9,10 @@ import { CONTRACT_ADDRESS } from "../../utils/constants";
 import { merkleTree } from "../../helpers/merkle_tree";
 import { useZkVerifier } from "../../helpers/gen_proof";
 import { useIndexerDeposits } from "../../helpers/use_indexer_deposits";
-import {
-  type CommitmentData,
-  btnPrimary,
-  btnGhost,
-  inputStyle,
-} from "./shared";
+import { btnPrimary, btnGhost, inputStyle } from "./shared";
 import { assertReceiptSuccess } from "../../utils/helpers";
-import { decryptNote } from "../../helpers/encrypt";
-
-const PINATA_GATEWAY =
-  import.meta.env.VITE_PINATA_GATEWAY ?? "https://gateway.pinata.cloud";
+import { type NoteData } from "../../helpers/get_note";
+import NoteLoader from "../../components/NoteLoader";
 
 export default function WithdrawTab() {
   const { address, account } = useAccount();
@@ -27,14 +20,10 @@ export default function WithdrawTab() {
   const { generateProof } = useZkVerifier();
   const { fetchAllCommitments } = useIndexerDeposits();
 
-  const [withdrawNote, setWithdrawNote] = useState("");
+  const [note, setNote] = useState<NoteData | null>(null);
   const [recipient, setRecipient] = useState("");
   const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
-
-  // IPFS recovery state
-  const [cid, setCid] = useState("");
-  const [fetchLoading, setFetchLoading] = useState(false);
 
   const { data: wbtcDenom } = useReadContract({
     abi,
@@ -44,44 +33,17 @@ export default function WithdrawTab() {
   });
 
   const denomDisplay = wbtcDenom
-    ? `${(Number(wbtcDenom as bigint) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })}wBTC`
+    ? `${(Number(wbtcDenom as bigint) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })} wBTC`
     : "—";
-
-  // ── Recover note from IPFS CID ────────────────────────────────────────────
-  const handleFetchNote = async () => {
-    if (!account || !cid.trim()) return;
-    setFetchLoading(true);
-    try {
-      const res = await fetch(`${PINATA_GATEWAY}/ipfs/${cid.trim()}`);
-      if (!res.ok) throw new Error(`Gateway error: ${res.status}`);
-      const { encrypted } = await res.json();
-      if (!encrypted)
-        throw new Error("Invalid IPFS payload — missing encrypted field");
-
-      const note = await decryptNote(account, encrypted);
-      setWithdrawNote(JSON.stringify(note, null, 2));
-      toast.success("Note recovered from IPFS!");
-    } catch (err: any) {
-      toast.error(
-        err?.message ?? "Failed to decrypt — wrong wallet or invalid CID.",
-      );
-    } finally {
-      setFetchLoading(false);
-    }
-  };
 
   const handleWithdraw = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!account || !contract) {
-      toast.error("Connect your wallet.");
-      return;
-    }
-    if (!withdrawNote.trim() || !recipient.trim()) return;
+    if (!account || !contract) return toast.error("Connect your wallet.");
+    if (!note || !recipient.trim()) return;
     setWithdrawError(null);
     setWithdrawLoading(true);
 
     try {
-      const note: CommitmentData = JSON.parse(withdrawNote);
       const commitments = await fetchAllCommitments();
       const noteCommitment = BigInt(note.commitment).toString();
       const tree = await merkleTree(commitments);
@@ -98,7 +60,7 @@ export default function WithdrawTab() {
       const noirInput = {
         root: merkleProof.root.toString(),
         nullifier_hash: nullifierHash,
-        recipient: recipient,
+        recipient,
         recipient_hash: recipientHash,
         nullifier: note.nullifier,
         secret: note.secret,
@@ -115,21 +77,19 @@ export default function WithdrawTab() {
         isLoading: false,
         type: "success",
       });
-
       toast.dismiss(toastId);
+
       const populate = contract.populate("zk_withdraw_wbtc", [
         callData.slice(1),
         recipient,
       ]);
-
       await account.estimateInvokeFee([populate]);
       const tx = await account.execute([populate]);
       const receipt = await account.waitForTransaction(tx.transaction_hash);
       assertReceiptSuccess(receipt);
       toast.success("Withdrawn! wBTC sent to your wallet 🎉");
-      setWithdrawNote("");
+      setNote(null);
       setRecipient("");
-      setCid("");
     } catch (err: any) {
       const msg =
         err?.baseError?.data?.execution_error?.error ??
@@ -171,164 +131,64 @@ export default function WithdrawTab() {
         </div>
       </div>
 
-      {/* IPFS recovery */}
-      <div
-        style={{
-          background: "#111118",
-          border: "1px solid #1e1e2e",
-          borderRadius: 10,
-          padding: "1.25rem",
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.65rem",
-        }}
-      >
-        <label
-          style={{
-            color: "#3a3a4a",
-            fontSize: "0.6rem",
-            letterSpacing: "0.15em",
-            textTransform: "uppercase",
-          }}
-        >
-          Recover note from IPFS
-        </label>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <input
-            value={cid}
-            onChange={(e) => setCid(e.target.value)}
-            placeholder="Paste your IPFS CID…"
-            style={{ ...inputStyle, flex: 1 }}
-          />
-          <button
-            type="button"
-            onClick={handleFetchNote}
-            disabled={fetchLoading || !cid.trim() || !account}
-            style={{
-              ...btnPrimary(!!(cid.trim() && !fetchLoading && account)),
-              width: "auto",
-              padding: "0.6rem 1rem",
-              flexShrink: 0,
-            }}
-          >
-            {fetchLoading ? (
-              <FaSpinner
-                size={11}
-                style={{ animation: "spin 1s linear infinite" }}
-              />
-            ) : (
-              <FaCloudDownloadAlt size={13} />
-            )}
-            &nbsp;{fetchLoading ? "Decrypting…" : "Recover"}
-          </button>
-        </div>
-        <p
-          style={{
-            color: "#2a2a3a",
-            fontSize: "0.6rem",
-            margin: 0,
-            letterSpacing: "0.06em",
-          }}
-        >
-          Sign with the same wallet used to deposit — your key decrypts the note
-        </p>
-      </div>
+      {/* Note loader */}
+      <NoteLoader onNote={(n) => setNote(n)} />
 
-      {/* Divider */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-        <div style={{ flex: 1, height: 1, background: "#1e1e2e" }} />
-        <span
+      {/* Note loaded confirmation */}
+      {note && (
+        <div
           style={{
-            color: "#2a2a3a",
-            fontSize: "0.6rem",
-            letterSpacing: "0.12em",
-          }}
-        >
-          OR
-        </span>
-        <div style={{ flex: 1, height: 1, background: "#1e1e2e" }} />
-      </div>
-
-      {/* Note input */}
-      <div
-        style={{
-          background: "#111118",
-          border: "1px solid #1e1e2e",
-          borderRadius: 10,
-          padding: "1.25rem",
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.65rem",
-        }}
-      >
-        <label
-          style={{
-            color: "#3a3a4a",
-            fontSize: "0.6rem",
-            letterSpacing: "0.15em",
-            textTransform: "uppercase",
-          }}
-        >
-          Paste or upload your note
-        </label>
-        <textarea
-          value={withdrawNote}
-          onChange={(e) => setWithdrawNote(e.target.value)}
-          placeholder='{ "nullifier": "0x...", "secret": "0x...", "commitment": "0x..." }'
-          rows={4}
-          style={{
-            ...inputStyle,
-            resize: "none",
-            lineHeight: 1.7,
-            color: withdrawNote ? "#fff" : "#2a2a3a",
-            fontSize: "0.72rem",
-          }}
-          onFocus={(e) => {
-            e.target.style.borderColor = "#ffc800";
-            e.target.style.boxShadow = "0 0 0 2px rgba(255,200,0,0.08)";
-          }}
-          onBlur={(e) => {
-            e.target.style.borderColor = "#2a2a3a";
-            e.target.style.boxShadow = "none";
-          }}
-        />
-        <label
-          htmlFor="note-file"
-          style={{
+            background: "rgba(34,197,94,0.04)",
+            border: "1px solid rgba(34,197,94,0.2)",
+            borderRadius: 8,
+            padding: "0.75rem 1rem",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
-            gap: "0.5rem",
-            padding: "0.65rem",
-            border: "1px dashed #1e1e2e",
-            borderRadius: 8,
-            color: "#3a3a4a",
-            fontSize: "0.68rem",
-            cursor: "pointer",
-            letterSpacing: "0.08em",
-            transition: "border-color 0.2s",
+            justifyContent: "space-between",
+            gap: "0.75rem",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#555")}
-          onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#1e1e2e")}
         >
-          <FaUpload size={10} />
-          Upload umbra-note.json
-          <input
-            id="note-file"
-            type="file"
-            accept=".json"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              const reader = new FileReader();
-              reader.onload = (ev) =>
-                setWithdrawNote(ev.target?.result as string);
-              reader.readAsText(file);
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <div
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: "#22c55e",
+                flexShrink: 0,
+              }}
+            />
+            <span
+              style={{ color: "#22c55e", fontSize: "0.68rem", fontWeight: 700 }}
+            >
+              Note loaded
+            </span>
+            <span
+              style={{
+                color: "#3a3a4a",
+                fontSize: "0.62rem",
+                fontFamily: "'DM Mono', monospace",
+              }}
+            >
+              {note.commitment.slice(0, 14)}…
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNote(null)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#3a3a4a",
+              fontSize: "0.62rem",
+              cursor: "pointer",
+              padding: 0,
             }}
-          />
-        </label>
-      </div>
+          >
+            ✕ Clear
+          </button>
+        </div>
+      )}
 
       {/* Recipient */}
       <div
@@ -471,17 +331,9 @@ export default function WithdrawTab() {
 
       <button
         type="submit"
-        disabled={
-          !withdrawNote.trim() ||
-          !recipient.trim() ||
-          withdrawLoading ||
-          !address
-        }
+        disabled={!note || !recipient.trim() || withdrawLoading || !address}
         style={btnPrimary(
-          !!withdrawNote.trim() &&
-            !!recipient.trim() &&
-            !withdrawLoading &&
-            !!address,
+          !!note && !!recipient.trim() && !withdrawLoading && !!address,
         )}
       >
         {withdrawLoading ? (
