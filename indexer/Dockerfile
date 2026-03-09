@@ -13,4 +13,4 @@ RUN yarn build
 
 EXPOSE 5100
 
-CMD ["yarn", "start"]
+CMD ["node", "dist/src/index.js"]
