@@ -4,7 +4,7 @@ dist
 dist-ssr
 *.local
 .env
-logs/*
+logs
 *.rdb
 build
 coverage
