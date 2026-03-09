@@ -8,6 +8,8 @@ import {
   FaDownload,
   FaFaucet,
   FaCopy,
+  FaCheck,
+  FaRedo,
 } from "react-icons/fa";
 import { RiShieldKeyholeFill, RiEyeOffFill } from "react-icons/ri";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
@@ -56,6 +58,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
   const [approveLoading, setApproveLoading] = useState(false);
   const [depositLoading, setDepositLoading] = useState(false);
   const [mintLoading, setMintLoading] = useState(false);
+  const [ipfsRetryLoading, setIpfsRetryLoading] = useState(false);
   const [BTCDenomination, setBTCDenomination] = useState(0);
   const [cid, setCid] = useState("");
   const [cidCopied, setCidCopied] = useState(false);
@@ -96,17 +99,28 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
     getDenom();
   }, [account, contract]);
 
-  const downloadNote = useCallback(() => {
-    const note = JSON.stringify({ nullifier, secret, commitment }, null, 2);
-    const blob = new Blob([note], { type: "application/json" });
+  // ── Recovery file: CID + which wallet encrypted it ───────────────────────
+  const downloadRecoveryFile = useCallback(() => {
+    if (!cid) return;
+    const recovery = JSON.stringify(
+      {
+        cid,
+        encrypted_with: address,
+        instructions:
+          "In the Withdraw tab, paste this CID and connect the wallet above to decrypt your note.",
+      },
+      null,
+      2,
+    );
+    const blob = new Blob([recovery], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `umbra-note-${Date.now()}.json`;
+    a.download = `umbra-recovery-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    toast.success("Note saved — keep this file safe!");
-  }, [nullifier, secret, commitment]);
+    toast.success("Recovery file saved!");
+  }, [cid, address]);
 
   const copyCid = useCallback(() => {
     if (!cid) return;
@@ -133,7 +147,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
       });
       await account.waitForTransaction(tx.transaction_hash);
       toast.update(toastId, {
-        render: `Minted ${Number(MINT_AMOUNT)} sat wBTC to your wallet!`,
+        render: `Minted ${Number(MINT_AMOUNT).toLocaleString()} sat wBTC to your wallet!`,
         isLoading: false,
         type: "success",
         autoClose: 5000,
@@ -211,7 +225,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
       assertReceiptSuccess(receipt);
       toast.success("Deposited into Umbra pool!");
 
-      // Encrypt note and pin to IPFS — non-blocking
+      // Encrypt and pin — non-blocking
       try {
         const encrypted = await encryptNote(account, {
           nullifier,
@@ -223,7 +237,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
         toast.success("Note encrypted and pinned to IPFS!");
       } catch (ipfsErr: any) {
         toast.warning(
-          "Deposit succeeded but IPFS pin failed — download your note as backup.",
+          "Deposit succeeded but IPFS pin failed — stay on this page and retry.",
         );
         console.error("IPFS pin error:", ipfsErr?.message);
       }
@@ -237,6 +251,25 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
       toast.error(executionError);
     } finally {
       setDepositLoading(false);
+    }
+  };
+
+  const handleIpfsRetry = async () => {
+    if (!account || !nullifier || !secret || !commitment) return;
+    setIpfsRetryLoading(true);
+    try {
+      const encrypted = await encryptNote(account, {
+        nullifier,
+        secret,
+        commitment,
+      });
+      const ipfsCid = await pinToIPFS(encrypted);
+      setCid(ipfsCid);
+      toast.success("Note encrypted and pinned to IPFS!");
+    } catch (err: any) {
+      toast.error("Retry failed — " + (err?.message ?? "unknown error"));
+    } finally {
+      setIpfsRetryLoading(false);
     }
   };
 
@@ -339,7 +372,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
         />
         <StepRow
           n={4}
-          label="Save note for withdrawal"
+          label="Save recovery file"
           done={step === 4}
           active={step === 4}
         />
@@ -426,10 +459,6 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
             secret={secret}
             commitment={commitment}
           />
-          <button onClick={downloadNote} style={btnGhost}>
-            <FaDownload size={11} />
-            Save umbra-note.json — required to withdraw
-          </button>
           <button
             onClick={handleApprove}
             disabled={approveLoading}
@@ -576,18 +605,18 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
             wallet — no link will ever appear on-chain.
           </div>
 
-          {/* IPFS CID box */}
           {cid ? (
+            /* ── IPFS success ── */
             <div
               style={{
                 width: "100%",
                 background: "#0a0a0f",
                 border: "1px solid rgba(255,200,0,0.2)",
                 borderRadius: 8,
-                padding: "0.85rem",
+                padding: "1rem",
                 display: "flex",
                 flexDirection: "column",
-                gap: "0.5rem",
+                gap: "0.65rem",
                 textAlign: "left",
               }}
             >
@@ -599,7 +628,7 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
                   textTransform: "uppercase",
                 }}
               >
-                IPFS CID — save this to recover your note from any wallet
+                IPFS CID — your encrypted note
               </div>
               <div
                 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
@@ -629,44 +658,108 @@ export default function DepositTab({ payoutDisplay }: DepositTabProps) {
                     transition: "all 0.15s",
                   }}
                 >
-                  <FaCopy size={11} />
+                  {cidCopied ? <FaCheck size={11} /> : <FaCopy size={11} />}
                 </button>
               </div>
+
+              <div
+                style={{
+                  background: "#111118",
+                  border: "1px solid #1e1e2e",
+                  borderRadius: 6,
+                  padding: "0.55rem 0.75rem",
+                }}
+              >
+                <div
+                  style={{
+                    color: "#2a2a3a",
+                    fontSize: "0.55rem",
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    marginBottom: "0.25rem",
+                  }}
+                >
+                  Encrypted with
+                </div>
+                <div
+                  style={{
+                    color: "#555",
+                    fontSize: "0.62rem",
+                    fontFamily: "'DM Mono', monospace",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {address}
+                </div>
+              </div>
+
               <div
                 style={{
                   color: "#2a2a3a",
                   fontSize: "0.58rem",
-                  lineHeight: 1.6,
+                  lineHeight: 1.65,
                 }}
               >
-                Your note is encrypted with your wallet key. Paste this CID in
-                the Withdraw tab to recover it.
+                Only this wallet can decrypt the note. To withdraw from a
+                different wallet, connect this wallet first to decrypt, copy the
+                note, then switch.
               </div>
+
+              <button
+                onClick={downloadRecoveryFile}
+                style={{ ...btnGhost, marginTop: "0.15rem" }}
+              >
+                <FaDownload size={11} />
+                Download umbra-recovery.json
+              </button>
             </div>
           ) : (
+            /* ── IPFS failed — retry only, no plaintext fallback ── */
             <div
               style={{
                 width: "100%",
                 background: "#0a0a0f",
-                border: "1px solid #1e1e2e",
+                border: "1px solid rgba(248,113,113,0.2)",
                 borderRadius: 8,
-                padding: "0.75rem",
-                color: "#3a3a4a",
-                fontSize: "0.65rem",
-                textAlign: "center",
+                padding: "1rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.65rem",
+                textAlign: "left",
               }}
             >
-              IPFS pin unavailable — use the JSON download below as backup
+              <div
+                style={{
+                  color: "#f87171",
+                  fontSize: "0.65rem",
+                  lineHeight: 1.65,
+                }}
+              >
+                ⚠ IPFS pin failed — your deposit is safe but the note is not
+                backed up yet. Do not close this page. Retry to encrypt and pin
+                your note.
+              </div>
+              <button
+                onClick={handleIpfsRetry}
+                disabled={ipfsRetryLoading}
+                style={btnPrimary(!ipfsRetryLoading)}
+              >
+                {ipfsRetryLoading ? (
+                  <>
+                    <FaSpinner
+                      size={13}
+                      style={{ animation: "spin 1s linear infinite" }}
+                    />{" "}
+                    Retrying…
+                  </>
+                ) : (
+                  <>
+                    <FaRedo size={12} /> Retry IPFS pin
+                  </>
+                )}
+              </button>
             </div>
           )}
-
-          <button
-            onClick={downloadNote}
-            style={{ ...btnGhost, width: "auto", padding: "0.6rem 1.25rem" }}
-          >
-            <FaDownload size={11} />
-            Re-download note
-          </button>
         </div>
       )}
     </div>

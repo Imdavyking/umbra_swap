@@ -1,4 +1,6 @@
 import { PinataSDK } from "pinata";
+import dotenv from "dotenv";
+dotenv.config();
 
 const pinata = new PinataSDK({
   pinataJwt: process.env.PINATA_JWT,
@@ -20,6 +22,7 @@ export const pinNote = async (encrypted: string): Promise<string | null> => {
     const { cid } = await pinata.upload.public.json({ encrypted });
     return cid;
   } catch (_) {
+    console.log(_);
     return null;
   }
 };
