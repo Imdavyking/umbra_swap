@@ -48,6 +48,8 @@ export function createWriters(ctx: Context) {
       leafIndex = Number(rawEvent.data[2]);
       timestamp = Number(rawEvent.data[3]);
     } else return;
+    const existing = await Deposit.loadEntity(commitment, ctx.indexerName);
+    if (existing) return;
     const deposit = new Deposit(commitment, ctx.indexerName);
     deposit.commitment = commitment;
     deposit.leaf_index = leafIndex;
@@ -75,6 +77,11 @@ export function createWriters(ctx: Context) {
       recipient = toHexAddress(rawEvent.data[0]);
       nullifierHash = readU256(rawEvent.data[1], rawEvent.data[2]);
     } else return;
+    const existing = await Withdrawal.loadEntity(
+      nullifierHash,
+      ctx.indexerName,
+    );
+    if (existing) return;
     const withdrawal = new Withdrawal(nullifierHash, ctx.indexerName);
     withdrawal.recipient = recipient;
     withdrawal.nullifier_hash = nullifierHash;
@@ -118,6 +125,8 @@ export function createWriters(ctx: Context) {
       expiry = Number(d[9]);
       rateExpiry = Number(d[10]);
     } else return;
+    const existing = await WbtcOrder.loadEntity(id, ctx.indexerName);
+    if (existing) return;
     const order = new WbtcOrder(id, ctx.indexerName);
     order.wbtc_seller = wbtcSeller;
     order.alice_strk_destination = aliceStrkDest;
@@ -163,7 +172,7 @@ export function createWriters(ctx: Context) {
       bobExpiry = Number(d[7]);
     } else return;
     const order = await WbtcOrder.loadEntity(wbtcOrderId, ctx.indexerName);
-    if (order) {
+    if (order && !order.is_filled) {
       order.wbtc_buyer = bob;
       order.strk_order_id = strkOrderId;
       order.strk_amount_locked = strkAmount;
@@ -172,6 +181,11 @@ export function createWriters(ctx: Context) {
       order.filled_at_block = block.block_number;
       await order.save();
     }
+    const existingStrk = await StrkOrder.loadEntity(
+      strkOrderId,
+      ctx.indexerName,
+    );
+    if (existingStrk) return;
     const strkOrder = new StrkOrder(strkOrderId, ctx.indexerName);
     strkOrder.strk_seller = bob;
     strkOrder.strk_buyer = order?.alice_strk_destination ?? "0x0";
@@ -273,6 +287,8 @@ export function createWriters(ctx: Context) {
     const newOwner = event
       ? toHexAddress(event.new_owner)
       : toHexAddress(rawEvent.data[1]);
+    const existing = await OwnershipTransfer.loadEntity(txId, ctx.indexerName);
+    if (existing) return;
     const transfer = new OwnershipTransfer(txId, ctx.indexerName);
     transfer.previous_owner = previousOwner;
     transfer.new_owner = newOwner;
