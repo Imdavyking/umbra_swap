@@ -14,7 +14,7 @@ import {
 import { RiShieldKeyholeFill, RiEyeOffFill } from "react-icons/ri";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 import abi from "../../assets/json/abi";
-import { CONTRACT_ADDRESS } from "../../utils/constants";
+import { BACKEND_URL, CONTRACT_ADDRESS } from "../../utils/constants";
 import {
   type DepositStep,
   NotePreview,
@@ -28,8 +28,6 @@ import { encryptNote } from "../../helpers/encrypt";
 const VESU_WBTC =
   "0x063d32a3fa6074e72e7a1e06fe78c46a0c8473217773e19f11d8c8cbfc4ff8ca";
 const MINT_AMOUNT = 1_000n * 100000000n;
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:4000";
 
 async function pinToIPFS(encrypted: string): Promise<string> {
   const res = await fetch(`${BACKEND_URL}/pin`, {

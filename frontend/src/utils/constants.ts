@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { constants } from "starknet";
-
+export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 export const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
 export const GRAPH_QL_ENDPOINT = import.meta.env.VITE_GRAPH_QL_ENDPOINT;
 export const NATIVE_TOKEN =
