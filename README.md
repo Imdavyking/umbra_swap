@@ -1,8 +1,27 @@
 # Umbra — Private Bitcoin on Starknet
 
 > Deposit wBTC anonymously. Withdraw to any address. No on-chain link between depositor and withdrawer.
+> Your note — the key to your funds — is encrypted and stored on IPFS. Only your wallet can decrypt it.
 
-**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
+**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **IPFS / Pinata** (encrypted note storage) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
+
+---
+
+## The Privacy Stack
+
+Umbra combines two layers of privacy:
+
+**On-chain:** A ZK Merkle membership proof (Noir + Garaga) breaks the link between depositor and withdrawer at the protocol level. No address association ever appears on Starknet.
+
+**Off-chain:** The `{ nullifier, secret, commitment }` note that controls a deposit must be stored somewhere. Umbra encrypts it with a key derived from your wallet signature and pins the ciphertext to **IPFS**. The plaintext never leaves your browser. The IPFS CID is the only thing you need to remember — and only the depositing wallet can decrypt it.
+
+```
+Your note  ──AES-GCM──▶  ciphertext  ──Pinata──▶  IPFS
+                 ▲                                   │
+         wallet signature                            │ CID
+         (key derivation)                            │
+                                             umbra-recovery.json
+```
 
 ---
 
@@ -10,35 +29,57 @@
 
 ### 1. Deposit
 
-1. Generate `nullifier` and `secret` offchain
+1. Generate `nullifier` and `secret` locally in your browser
 2. Compute `commitment = Poseidon2(nullifier, secret)`
-3. Save your note `{ nullifier, secret, commitment }` — **required for all future actions**
-4. Approve and call `deposit(commitment)` — locks `1,000 sat` wBTC, inserts leaf into Merkle tree
+3. Approve and call `deposit(commitment)` — locks `1,000 sat` wBTC, inserts leaf into Merkle tree
+4. Your wallet signs a typed-data message; Umbra derives an AES-GCM key from the signature
+5. The note is encrypted client-side and the **ciphertext is pinned to IPFS** via a backend relay
+6. You receive an **IPFS CID** and can download `umbra-recovery.json` — the CID + the encrypting wallet address
 
-### 2. ZK Withdraw
+> Nothing sensitive ever leaves your browser. IPFS stores only the encrypted blob. The note is unrecoverable without both the CID and the original signing wallet.
 
-1. Load your note → frontend reconstructs Merkle tree from indexed deposits
+### 2. Loading Your Note (Withdraw / Yield / Swap)
+
+All three tabs share the same **NoteLoader** component. Three ways to load a note:
+
+| Method             | When to use                                                                   |
+| ------------------ | ----------------------------------------------------------------------------- |
+| **Paste IPFS CID** | You have the CID from step 6 — connect the deposit wallet to decrypt          |
+| **Upload file**    | Upload `umbra-recovery.json` (pre-fills CID) or a plaintext `umbra-note.json` |
+| **Paste raw JSON** | Manually paste `{ nullifier, secret, commitment }`                            |
+
+**Cross-wallet privacy flow (recommended):**
+
+1. Connect **wallet A** (depositor) → paste CID → click **Decrypt**
+2. The note decrypts locally — copy it or click **"Use this note →"**
+3. Disconnect wallet A, connect **wallet B** (withdrawer)
+4. Submit the transaction from wallet B — no link to wallet A appears on-chain
+
+### 3. ZK Withdraw
+
+1. Load your note via NoteLoader → frontend reconstructs the Merkle tree from indexed deposits
 2. Noir generates a ZK proof of membership without revealing your leaf
 3. Call `zk_withdraw_wbtc(proof, recipient)` → contract verifies proof, checks nullifier, sends wBTC
 
 > `recipient` is bound to the proof via `recipient_hash = Poseidon2(recipient)` — changing it invalidates the proof and prevents frontrunning.
 
-### 3. Yield Earning (Vesu)
+### 4. Yield Earning (Vesu)
 
-1. Load your note → generate ZK proof (same flow as withdraw)
+1. Load your note via NoteLoader → generate ZK proof (same flow as withdraw)
 2. Call `start_earning(proof, recipient)` — marks nullifier spent, deposits wBTC into Vesu lending pool, locks `recipient` on-chain
 3. Vesu mints yield-bearing shares that appreciate as borrowers pay interest
-4. When ready, call `stop_earning(nullifier_hash)` — redeems shares, sends wBTC + all accrued yield to `recipient`
+4. Call `stop_earning(nullifier_hash)` — redeems shares, sends wBTC + all accrued yield to `recipient`
 
-> The link between the original depositor and the yield position is broken by the ZK proof — but the recipient address and share balance are public storage. Once `start_earning` is called, the note is consumed. The only exit is `stop_earning`.
+> Once `start_earning` is called the note is consumed. The only exit is `stop_earning`.
 
-### 4. HTLC Swap (wBTC → STRK)
+### 5. HTLC Swap (wBTC → STRK)
 
 **Alice (wBTC seller):**
 
-1. Generate `secret`, compute `hashlock = pedersen(0, secret)`
-2. Call `post_wbtc_order(proof, strk_dest, hashlock, expiry, slippage_bps)` — locks wBTC, quotes live rate
-3. After Bob fills, call `withdraw_strk(strk_order_id, secret)` — claims STRK, publishes secret on-chain
+1. Load note via NoteLoader → generate ZK proof
+2. Generate `secret`, compute `hashlock = pedersen(0, secret)`
+3. Call `post_wbtc_order(proof, strk_dest, hashlock, expiry, slippage_bps)` — locks wBTC, quotes live rate
+4. After Bob fills, call `withdraw_strk(strk_order_id, secret)` — claims STRK, publishes secret on-chain
 
 **Bob (STRK seller):**
 
@@ -66,7 +107,43 @@ The circuit proves:
 - `nullifier_hash = Poseidon2(nullifier)` — double-spend prevention without revealing nullifier
 - `recipient_hash = Poseidon2(recipient)` — binds destination address to the proof, blocking frontrunning
 
-The same proof is used for `zk_withdraw_wbtc`, `start_earning`, and `post_wbtc_order` — each binding a different destination address as the recipient.
+The same proof is used for `zk_withdraw_wbtc`, `start_earning`, and `post_wbtc_order`.
+
+---
+
+## Note Encryption & IPFS Storage
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     CLIENT (browser)                        │
+│                                                             │
+│  note = { nullifier, secret, commitment }                   │
+│                    │                                        │
+│                    ▼                                        │
+│  sig  = wallet.signMessage(TYPED_DATA)                      │
+│  key  = AES-GCM key from sig.r                              │
+│  iv   = crypto.getRandomValues(12 bytes)                    │
+│  blob = AES-GCM-256(key, iv, JSON(note))                    │
+│                    │                                        │
+└────────────────────┼────────────────────────────────────────┘
+                     │ { iv, data }  (POST /pin)
+                     ▼
+              ┌─────────────┐
+              │   Backend   │  ← Pinata JWT lives here only
+              └──────┬──────┘
+                     │ pinata.upload.public.json(blob)
+                     ▼
+                   IPFS
+                     │
+                     └──▶  CID  ──▶  user saves umbra-recovery.json
+```
+
+**Key properties:**
+
+- The signing wallet is the only entity that can derive the decryption key
+- The backend relay never sees the plaintext note — only the encrypted blob
+- `umbra-recovery.json` contains `{ cid, encrypted_with }` — no key material
+- If IPFS pin fails, a retry button is shown; the page must stay open until the pin succeeds
 
 ---
 
@@ -97,9 +174,9 @@ The same proof is used for `zk_withdraw_wbtc`, `start_earning`, and `post_wbtc_o
 **Token addresses (Sepolia):**
 
 ```
-wBTC: 0x063d32a3fa6074e72e7a1e06fe78c46a0c8473217773e19f11d8c8cbfc4ff8ca
-STRK: 0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
-USDC: 0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8
+wBTC:        0x063d32a3fa6074e72e7a1e06fe78c46a0c8473217773e19f11d8c8cbfc4ff8ca
+STRK:        0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
+USDC:        0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8
 Vesu vToken: 0x05868ed6b7c57ac071bf6bfe762174a2522858b700ba9fb062709e63b65bf186
 ```
 
@@ -111,21 +188,27 @@ Vesu vToken: 0x05868ed6b7c57ac071bf6bfe762174a2522858b700ba9fb062709e63b65bf186
 contracts/   Cairo contracts (PrivateSwap, IMT, Poseidon2, MockUSDC)
 noir/        ZK circuit (Merkle membership proof)
 indexer/     Checkpoint indexer → GraphQL API
+backend/     IPFS pin relay (POST /pin → Pinata)
 frontend/    React UI (Deposit, Withdraw, Swap, Yield tabs)
 ```
 
 **Key decisions:**
 
-| Decision                   | Reason                                                                 |
-| -------------------------- | ---------------------------------------------------------------------- |
-| Poseidon2 over BN254       | Matches Noir's native hash                                             |
-| IMT depth 10               | ~1,024 deposits (testnet scope)                                        |
-| Root history (30)          | Withdraw even after new deposits                                       |
-| Nullifier hash as order ID | Unique, already on-chain                                               |
-| Recipient hash in proof    | Prevents frontrunning on all ZK functions                              |
-| Vesu ERC-4626 for yield    | Non-custodial, share-based — yield accrues automatically               |
-| Checkpoint indexer         | Single GraphQL query vs O(n) RPC calls for order and execution history |
-| Mock USDC with public mint | Judges can fund themselves instantly without external faucets          |
+| Decision                   | Reason                                                                    |
+| -------------------------- | ------------------------------------------------------------------------- |
+| Poseidon2 over BN254       | Matches Noir's native hash                                                |
+| IMT depth 10               | ~1,024 deposits (testnet scope)                                           |
+| Root history (30)          | Withdraw even after new deposits                                          |
+| Nullifier hash as order ID | Unique, already on-chain                                                  |
+| Recipient hash in proof    | Prevents frontrunning on all ZK functions                                 |
+| Vesu ERC-4626 for yield    | Non-custodial, share-based — yield accrues automatically                  |
+| IPFS for note storage      | Censorship-resistant, content-addressed, no server to subpoena            |
+| Signature-derived AES-GCM  | Wallet-bound encryption — no key ever stored anywhere                     |
+| Backend pin relay          | Keeps Pinata JWT off the client; note is encrypted before it arrives      |
+| umbra-recovery.json        | CID + encrypting address — enough to re-derive the decryption key         |
+| Shared NoteLoader          | Withdraw, Yield, and Swap all load notes the same way (CID / JSON / file) |
+| Checkpoint indexer         | Single GraphQL query vs O(n) RPC calls for order and execution history    |
+| Mock USDC with public mint | Judges can fund themselves instantly without external faucets             |
 
 **Oracle (Pragma, Chainlink, Sepolia):**
 
@@ -160,7 +243,7 @@ make install-starknet          # starkup (Cairo toolchain)
 make install-scarb             # Scarb 2.14.0 via asdf
 make install-foundry           # starknet-foundry 0.53.0 via asdf
 make install-garaga            # garaga 1.0.1 (verifier codegen)
-make install-app-deps          # frontend JS deps
+make install-app-deps          # frontend + backend JS deps
 ```
 
 ### 2. Build the ZK circuit
@@ -194,11 +277,12 @@ make artifacts
 
 ```bash
 cp indexer/.env.example indexer/.env
+cp backend/.env.example backend/.env   # add PINATA_JWT
 cp frontend/.env.example frontend/.env
 make up                        # docker compose up --build
 ```
 
-Services: **Postgres** `:5555` · **Indexer + GraphQL** `:5100` · **Frontend** `:3000`
+Services: **Postgres** `:5555` · **Indexer + GraphQL** `:5100` · **Backend** `:4000` · **Frontend** `:3000`
 
 > Always run `make up` from the root. Running `make up-indexer` first will bind port 5100 and cause a conflict.
 
@@ -206,6 +290,7 @@ Services: **Postgres** `:5555` · **Indexer + GraphQL** `:5100` · **Frontend** 
 
 ```bash
 make run-indexer               # indexer only (yarn dev)
+make run-backend               # backend only (yarn dev)
 make run-frontend              # frontend only (yarn dev)
 ```
 
@@ -232,9 +317,13 @@ RPC_URL=https://...
 CONTRACT_ADDRESS=0x...
 START_BLOCK=0
 
+# backend
+PINATA_JWT=...
+
 # frontend
 VITE_CONTRACT_ADDRESS=0x...
 VITE_GRAPH_QL_ENDPOINT=http://localhost:5100/graphql
+VITE_BACKEND_URL=http://localhost:4000
 ```
 
 ---
@@ -249,6 +338,8 @@ VITE_GRAPH_QL_ENDPOINT=http://localhost:5100/graphql
 - Bob expiry strictly < Alice expiry — HTLC ordering enforced on-chain
 - `swap_initiated` flag — Alice cannot double-spend after secret reveal
 - Rate expiry (1h) + slippage guard — protects Alice from price manipulation at fill time
+- Note encryption key derived from wallet signature — never stored; only AES-GCM ciphertext reaches IPFS
+- Backend pin relay never receives plaintext — encryption happens entirely in the browser
 - All admin functions are owner-only (`assert_only_owner`)
 
 > ⚠️ Unaudited testnet demo — do not use with real funds.
