@@ -21,6 +21,12 @@ app.use(
   }),
 );
 
+app.get("/", async (req: Request, res: Response) => {
+  return res.json({
+    info: "hello world",
+  });
+});
+
 app.post("/pin", async (req: Request, res: Response) => {
   const { encrypted } = req.body;
   if (!encrypted) {
