@@ -2,10 +2,12 @@ import dotenv from "dotenv";
 import express, { Request, Response, NextFunction } from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import cors from "cors";
-import logger from "./config/logger";
-import { pinNote } from "./services/pinata.services";
+import logger from "./config/logger.js";
+import { pinNote } from "./services/storacha.services.js";
 
 dotenv.config();
+
+pinNote("");
 
 const app = express();
 
@@ -41,14 +43,13 @@ app.post("/pin", async (req: Request, res: Response) => {
   res.json({ cid });
 });
 
-// Proxy for Pinata fetch (CORS bypass)
 app.use(
-  "/pinata",
+  "/ipfs",
   createProxyMiddleware({
     logger: logger,
-    target: "https://emerald-odd-bee-965.mypinata.cloud",
+    target: "https://w3s.link",
     changeOrigin: true,
-    pathRewrite: { "^/pinata": "/files" },
+    pathRewrite: { "^/ipfs": "/ipfs" },
   }),
 );
 

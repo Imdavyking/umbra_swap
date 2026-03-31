@@ -1,7 +1,7 @@
 import { decryptNote } from "./encrypt";
 
-const PINATA_GATEWAY =
-  import.meta.env.VITE_PINATA_GATEWAY ?? "https://gateway.pinata.cloud";
+const STORACHA_GATEWAY =
+  import.meta.env.VITE_STORACHA_GATEWAY ?? "https://storacha.link";
 
 export interface NoteData {
   nullifier: string;
@@ -9,15 +9,11 @@ export interface NoteData {
   commitment: string;
 }
 
-/**
- * Fetch an encrypted note from IPFS and decrypt it with the given account.
- * The account must be the same one used to encrypt at deposit time.
- */
 export async function getNoteFromCid(
   account: any,
   cid: string,
 ): Promise<NoteData> {
-  const res = await fetch(`${PINATA_GATEWAY}/ipfs/${cid.trim()}`);
+  const res = await fetch(`${STORACHA_GATEWAY}/ipfs/${cid.trim()}`);
   if (!res.ok) throw new Error(`IPFS gateway error: ${res.status}`);
 
   const json = await res.json();

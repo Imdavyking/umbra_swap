@@ -3,7 +3,7 @@
 > Deposit wBTC anonymously. Withdraw to any address. No on-chain link between depositor and withdrawer.
 > Your note — the key to your funds — is encrypted and stored on IPFS. Only your wallet can decrypt it.
 
-**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **IPFS / Pinata** (encrypted note storage) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
+**Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **Storacha** (encrypted note storage) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
 
 ---
 
@@ -13,13 +13,13 @@ Umbra combines two layers of privacy:
 
 **On-chain:** A ZK Merkle membership proof (Noir + Garaga) breaks the link between depositor and withdrawer at the protocol level. No address association ever appears on Starknet.
 
-**Off-chain:** The `{ nullifier, secret, commitment }` note that controls a deposit must be stored somewhere. Umbra encrypts it with a key derived from your wallet signature and pins the ciphertext to **IPFS**. The plaintext never leaves your browser. The IPFS CID is the only thing you need to remember — and only the depositing wallet can decrypt it.
+**Off-chain:** The `{ nullifier, secret, commitment }` note that controls a deposit must be stored somewhere. Umbra encrypts it with a key derived from your wallet signature and pins the ciphertext to **IPFS** via **Storacha**. The plaintext never leaves your browser. The IPFS CID is the only thing you need to remember — and only the depositing wallet can decrypt it.
 
 ```
-Your note  ──AES-GCM──▶  ciphertext  ──Pinata──▶  IPFS
-                 ▲                                   │
-         wallet signature                            │ CID
-         (key derivation)                            │
+Your note  ──AES-GCM──▶  ciphertext  ──Storacha──▶  IPFS
+                 ▲                                      │
+         wallet signature                               │ CID
+         (key derivation)                               │
                                              umbra-recovery.json
 ```
 
@@ -36,7 +36,7 @@ Your note  ──AES-GCM──▶  ciphertext  ──Pinata──▶  IPFS
 5. The note is encrypted client-side and the **ciphertext is pinned to IPFS** via a backend relay
 6. You receive an **IPFS CID** and can download `umbra-recovery.json` — the CID + the encrypting wallet address
 
-> Nothing sensitive ever leaves your browser. IPFS stores only the encrypted blob. The note is unrecoverable without both the CID and the original signing wallet.
+> Nothing sensitive ever leaves your browser. Storacha stores only the encrypted blob. The note is unrecoverable without both the CID and the original signing wallet.
 
 ### 2. Loading Your Note (Withdraw / Yield / Swap)
 
@@ -129,9 +129,9 @@ The same proof is used for `zk_withdraw_wbtc`, `start_earning`, and `post_wbtc_o
                      │ { iv, data }  (POST /pin)
                      ▼
               ┌─────────────┐
-              │   Backend   │  ← Pinata JWT lives here only
+              │   Backend   │  ← W3UP_KEY / W3UP_PROOF live here only
               └──────┬──────┘
-                     │ pinata.upload.public.json(blob)
+                     │ storacha.uploadFile(blob)
                      ▼
                    IPFS
                      │
@@ -188,27 +188,27 @@ Vesu vToken: 0x05868ed6b7c57ac071bf6bfe762174a2522858b700ba9fb062709e63b65bf186
 contracts/   Cairo contracts (PrivateSwap, IMT, Poseidon2, MockUSDC)
 noir/        ZK circuit (Merkle membership proof)
 indexer/     Checkpoint indexer → GraphQL API
-backend/     IPFS pin relay (POST /pin → Pinata)
+backend/     IPFS pin relay (POST /pin → Storacha)
 frontend/    React UI (Deposit, Withdraw, Swap, Yield tabs)
 ```
 
 **Key decisions:**
 
-| Decision                   | Reason                                                                    |
-| -------------------------- | ------------------------------------------------------------------------- |
-| Poseidon2 over BN254       | Matches Noir's native hash                                                |
-| IMT depth 10               | ~1,024 deposits (testnet scope)                                           |
-| Root history (30)          | Withdraw even after new deposits                                          |
-| Nullifier hash as order ID | Unique, already on-chain                                                  |
-| Recipient hash in proof    | Prevents frontrunning on all ZK functions                                 |
-| Vesu ERC-4626 for yield    | Non-custodial, share-based — yield accrues automatically                  |
-| IPFS for note storage      | Censorship-resistant, content-addressed, no server to subpoena            |
-| Signature-derived AES-GCM  | Wallet-bound encryption — no key ever stored anywhere                     |
-| Backend pin relay          | Keeps Pinata JWT off the client; note is encrypted before it arrives      |
-| umbra-recovery.json        | CID + encrypting address — enough to re-derive the decryption key         |
-| Shared NoteLoader          | Withdraw, Yield, and Swap all load notes the same way (CID / JSON / file) |
-| Checkpoint indexer         | Single GraphQL query vs O(n) RPC calls for order and execution history    |
-| Mock USDC with public mint | Judges can fund themselves instantly without external faucets             |
+| Decision                   | Reason                                                                                                                     |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Poseidon2 over BN254       | Matches Noir's native hash                                                                                                 |
+| IMT depth 10               | ~1,024 deposits (testnet scope)                                                                                            |
+| Root history (30)          | Withdraw even after new deposits                                                                                           |
+| Nullifier hash as order ID | Unique, already on-chain                                                                                                   |
+| Recipient hash in proof    | Prevents frontrunning on all ZK functions                                                                                  |
+| Vesu ERC-4626 for yield    | Non-custodial, share-based — yield accrues automatically                                                                   |
+| Storacha for note storage  | Protocol Labs' decentralized hot storage — censorship-resistant, no centralized pinner to subpoena, content-addressed CIDs |
+| Signature-derived AES-GCM  | Wallet-bound encryption — no key ever stored anywhere                                                                      |
+| Backend pin relay          | Keeps W3UP credentials off the client; note is encrypted before it arrives                                                 |
+| umbra-recovery.json        | CID + encrypting address — enough to re-derive the decryption key                                                          |
+| Shared NoteLoader          | Withdraw, Yield, and Swap all load notes the same way (CID / JSON / file)                                                  |
+| Checkpoint indexer         | Single GraphQL query vs O(n) RPC calls for order and execution history                                                     |
+| Mock USDC with public mint | Judges can fund themselves instantly without external faucets                                                              |
 
 **Oracle (Pragma, Chainlink, Sepolia):**
 
@@ -277,7 +277,7 @@ make artifacts
 
 ```bash
 cp indexer/.env.example indexer/.env
-cp backend/.env.example backend/.env   # add PINATA_JWT
+cp backend/.env.example backend/.env   # add W3UP_KEY and W3UP_PROOF
 cp frontend/.env.example frontend/.env
 make up                        # docker compose up --build
 ```
@@ -301,6 +301,20 @@ make devnet                    # starknet-devnet, 2 accounts, seed 0
 make accounts-file             # fetch predeployed accounts → contracts/accounts.json
 ```
 
+### Setting up Storacha credentials (one-time)
+
+```bash
+npm install -g @web3-storage/w3cli
+w3 login your@email.com                          # create / login to your account
+w3 space create umbra                            # create a storage space
+w3 key create                                    # outputs your W3UP_KEY
+w3 delegation create \
+  --can 'space/blob/add' \
+  --can 'space/index/add' \
+  --can 'upload/add' \
+  <paste-agent-did-from-above> | base64          # outputs your W3UP_PROOF
+```
+
 ---
 
 ## Environment Variables
@@ -318,7 +332,8 @@ CONTRACT_ADDRESS=0x...
 START_BLOCK=0
 
 # backend
-PINATA_JWT=...
+W3UP_KEY=...       # agent private key  (w3 key create)
+W3UP_PROOF=...     # delegation proof   (w3 delegation create ... | base64)
 
 # frontend
 VITE_CONTRACT_ADDRESS=0x...
@@ -338,7 +353,7 @@ VITE_BACKEND_URL=http://localhost:4000
 - Bob expiry strictly < Alice expiry — HTLC ordering enforced on-chain
 - `swap_initiated` flag — Alice cannot double-spend after secret reveal
 - Rate expiry (1h) + slippage guard — protects Alice from price manipulation at fill time
-- Note encryption key derived from wallet signature — never stored; only AES-GCM ciphertext reaches IPFS
+- Note encryption key derived from wallet signature — never stored; only AES-GCM ciphertext reaches Storacha/IPFS
 - Backend pin relay never receives plaintext — encryption happens entirely in the browser
 - All admin functions are owner-only (`assert_only_owner`)
 

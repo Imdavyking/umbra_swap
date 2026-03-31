@@ -1,7 +1,11 @@
 import { createLogger, format, transports } from "winston";
 import "winston-daily-rotate-file";
-import path from "path";
+import path, { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 function setup_HandleError(error: unknown, context: string): void {
   if (error instanceof Error) {
@@ -16,7 +20,7 @@ function setup_HandleError(error: unknown, context: string): void {
 }
 
 // Ensure the logs directory exists
-const logDir = path.join(__dirname, "../logs");
+const logDir = join(__dirname, "../logs");
 if (!fs.existsSync(logDir)) {
   fs.mkdirSync(logDir, { recursive: true });
 }
@@ -54,19 +58,17 @@ const customTimestamp = () => {
 const getEmojiForLevel = (level: string): string => {
   switch (level) {
     case "info":
-      return "💡"; // Light bulb for info
+      return "💡";
     case "error":
-      return "🚨"; // Emergency for errors
+      return "🚨";
     case "warn":
-      return "⚠️"; // Warning for warnings
+      return "⚠️";
     case "debug":
-      return "🐞"; // Bug for debug
+      return "🐞";
     default:
-      return "🔔"; // Default bell emoji
+      return "🔔";
   }
 };
-
-
 
 const logger = createLogger({
   levels: logLevels.levels,
@@ -87,29 +89,29 @@ const logger = createLogger({
       filename: "logs/%DATE%-combined.log",
       datePattern: "YYYY-MM-DD",
       level: "info",
-      maxFiles: "14d", // Keep logs for the last 14 days
-      maxSize: "20m", // Maximum log file size before rotation (20MB)
-      zippedArchive: true, // Compress old log files
+      maxFiles: "14d",
+      maxSize: "20m",
+      zippedArchive: true,
       format: format.combine(format.timestamp(), format.json()),
-    }), // Daily rotating log file for general info
+    }),
     new transports.DailyRotateFile({
       filename: "logs/%DATE%-error.log",
       datePattern: "YYYY-MM-DD",
       level: "error",
-      maxFiles: "14d", // Keep logs for the last 14 days
-      maxSize: "20m", // Maximum log file size before rotation (20MB)
-      zippedArchive: true, // Compress old log files
+      maxFiles: "14d",
+      maxSize: "20m",
+      zippedArchive: true,
       format: format.combine(format.timestamp(), format.json()),
-    }), // Daily rotating error log
+    }),
     new transports.DailyRotateFile({
       filename: "logs/%DATE%-debug.log",
       datePattern: "YYYY-MM-DD",
       level: "debug",
-      maxFiles: "14d", // Keep logs for the last 14 days
-      maxSize: "20m", // Maximum log file size before rotation (20MB)
-      zippedArchive: true, // Compress old log files
+      maxFiles: "14d",
+      maxSize: "20m",
+      zippedArchive: true,
       format: format.combine(format.timestamp(), format.json()),
-    }), // Daily rotating debug log
+    }),
   ],
 });
 
@@ -120,22 +122,17 @@ try {
   logger.error(`Could not set permissions for ${logDir}:`, error.message);
 }
 
-// Catch unhandled promise rejections
-
 export function setupErrorHandlers(): void {
-  // Catch unhandled promise rejections
   process.on("unhandledRejection", (error: unknown) => {
     setup_HandleError(error, "Unhandled Rejection");
     process.exit(1);
   });
 
-  // Catch uncaught exceptions
   process.on("uncaughtException", (error) => {
     setup_HandleError(error, "Uncaught Exception");
     process.exit(1);
   });
 
-  // Catch process warnings
   process.on("warning", (warning) => {
     logger.warn(`Warning: ${warning.message || warning}`);
   });
