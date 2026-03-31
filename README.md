@@ -1,7 +1,7 @@
 # Umbra — Private Bitcoin on Starknet
 
 > Deposit wBTC anonymously. Withdraw to any address. No on-chain link between depositor and withdrawer.
-> Your note — the key to your funds — is encrypted and stored on IPFS. Only your wallet can decrypt it.
+> Your note — the key to your funds — is encrypted and stored on IPFS via Storacha. Only your wallet can decrypt it.
 
 **Noir** (ZK proofs) · **Garaga** (on-chain verifier) · **Storacha** (encrypted note storage) · **Pragma/Chainlink** (oracle) · **Vesu** (yield) · **Poseidon2/BN254** (Merkle tree) · **HTLCs** (atomic swaps)
 
